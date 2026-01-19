@@ -6,19 +6,21 @@ BUILD_DIR = build
 # Build llama.cpp and pybind11 bindings
 build:
 	@echo "Building llama.cpp..."
-	cd $(LLAMA_DIR) && cmake -B build -DBUILD_SHARED_LIBS=ON && cmake --build build -j
+	cd $(LLAMA_DIR) && cmake -B build -DBUILD_SHARED_LIBS=ON -DGGML_METAL=ON && cmake --build build -j
 	
 	@echo "Building pybind11 bindings..."
 	cd bindings && cmake -B build \
 		-DLLAMA_DIR=../$(LLAMA_DIR) \
-		-Dpybind11_DIR=$$(python -c "import pybind11; print(pybind11.get_cmake_dir())") \
+		-DPYBIND11_FINDPYTHON=ON \
+		-DPython_EXECUTABLE=$$(uv run which python) \
+		-Dpybind11_DIR=$$(uv run python -c "import pybind11; print(pybind11.get_cmake_dir())") \
 		&& cmake --build build
 	
 	@echo "Copying libraries..."
 	mkdir -p src/lib
-	cp $(LLAMA_DIR)/build/libllama.dylib src/lib/ 2>/dev/null || cp $(LLAMA_DIR)/build/libllama.so src/lib/
-	cp $(LLAMA_DIR)/build/libggml*.dylib src/lib/ 2>/dev/null || cp $(LLAMA_DIR)/build/libggml*.so src/lib/ 2>/dev/null || true
-	cp bindings/build/llama_chat*.so src/ 2>/dev/null || cp bindings/build/llama_chat*.dylib src/
+	cp $(LLAMA_DIR)/build/bin/libllama*.dylib src/lib/ 2>/dev/null || cp $(LLAMA_DIR)/build/bin/libllama*.so src/lib/ 2>/dev/null
+	cp $(LLAMA_DIR)/build/bin/libggml*.dylib src/lib/ 2>/dev/null || cp $(LLAMA_DIR)/build/bin/libggml*.so src/lib/ 2>/dev/null || true
+	cp bindings/build/llama_chat*.so src/ 2>/dev/null || cp bindings/build/llama_chat*.dylib src/ 2>/dev/null
 
 # Clean build artifacts
 clean:
