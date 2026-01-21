@@ -54,3 +54,5 @@ bindings/build/
 # Temporary files
 *.tmp
 *.bak
+*.log
+scripts/hfd.sh

@@ -1,4 +1,4 @@
-.PHONY: build clean test dev
+.PHONY: build clean
 
 LLAMA_DIR = vendor/llama.cpp
 BUILD_DIR = build
@@ -26,20 +26,3 @@ build:
 clean:
 	rm -rf $(BUILD_DIR) $(LLAMA_DIR)/build bindings/build
 	rm -f src/lib/*.dylib src/lib/*.so src/*.so src/*.dylib
-
-# Run tests
-test:
-	uv run pytest tests/ -v
-
-# Install dev dependencies and setup environment
-dev:
-	uv sync --all-extras
-	. .venv/bin/activate && nodeenv -p
-
-# Download model helper
-hfd:
-	@echo "Usage: make hfd REPO=<org/repo> INCLUDE=<pattern>"
-	@echo "Example: make hfd REPO=bartowski/Qwen3-Coder-30B-A3B-Instruct-GGUF INCLUDE='*Q5_K_M.gguf'"
-ifdef REPO
-	bash scripts/hfd.sh $(REPO) --include "$(INCLUDE)" --local-dir models/$(REPO)
-endif

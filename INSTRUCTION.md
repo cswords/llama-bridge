@@ -79,14 +79,17 @@ Antigravity 在操作时必须遵循以下**权限约束**：
 ```
 llama-bridge/
 ├── vendor/
-│   └── llama.cpp/                  # llama.cpp submodule
+│   └── llama.cpp/                  # llama.cpp submodule (pinned to b7775)
 ├── bindings/
 │   ├── CMakeLists.txt              # 构建脚本
 │   └── llama_chat_wrapper.cpp      # pybind11 wrapper
 ├── src/                            # Python 源代码
-│   ├── server.py                   # FastAPI 服务器
-│   ├── bridge.py                   # 核心桥接逻辑
-│   └── litellm_adapter.py          # LiteLLM 集成
+│   ├── server.py                   # FastAPI server
+│   ├── bridge.py                   # Core Bridge logic
+│   └── adapters/                   # Protocol Adapters
+│       ├── base.py                 # Adapter interface
+│       ├── anthropic.py            # Anthropic adapter
+│       └── openai.py               # OpenAI adapter
 ├── tests/
 │   ├── unit/
 │   ├── integration/
@@ -132,11 +135,20 @@ logs/
 
 ## 5. 命令行接口 (uv run)
 
-1. **serve**: 启动服务（支持 `--debug`, `--mock`, `--model`, `--port`）
-2. **cc**: 设置环境变量并启动 Claude Code
-   * **模版**: `export ANTHROPIC_BASE_URL=http://localhost:8000/v1 && export ANTHROPIC_API_KEY=sk-ant-none && claude "$@"`
-3. **hfd**: 下载模型到 models/
-   * **注意**: 使用 `--include` glob 模式，**避免下载整个 Repo**
+1. **serve**: 启动服务
+   * 命令: `uv run serve --model <path> [--port <port>] [--debug]`
+   * 模型路径解析规则：
+     * 自动在 `models/` 目录下查找（无需手动添加 `models/` 前缀）
+     * 支持目录路径，自动查找其中的 `.gguf` 文件
+     * 分片模型自动选择第一个分片 (`-00001-of-`)
+   * 示例：
+     * `uv run serve --model Qwen/Qwen2.5-3B-Instruct-GGUF`
+     * `uv run serve --model unsloth/GLM-4.7-REAP-218B-A32B-GGUF/Q2_K`
+2. **cc**: Claude Code Wrapper
+   * 命令: `uv run cc` (自动配置 ANTHROPIC_BASE_URL)
+3. **hfd**: 下载模型
+   * 命令: `uv run hfd <repo> --include <glob>`
+   * 示例: `uv run hfd Qwen/Qwen2.5-3B-Instruct-GGUF --include "*q4_k_m.gguf"`
 
 ---
 
@@ -183,6 +195,9 @@ logs/
 
 ---
 
+
+---
+
 ## 9. 断点续传与进度自检 (State Check & Resumption)
 
 若开发过程因外部原因停止，Antigravity 在重新启动时应执行以下自检流程：
@@ -191,6 +206,98 @@ logs/
 2. **定位进度**：依次运行 Step 0 至 Step 4 相关的测试，根据第一个失败的测试用例判定当前所在的 Step
 3. **恢复上下文**：分析最新的 logs/ 日志，理解中断前的最后一次请求
 4. **自主接力**：直接从断点处继续执行工作流
+
+### 9.1 [TODO] 自动上下文切换侦测 (Auto Context Switching)
+
+当前系统使用基于长度和匹配度的启发式算法来区分"临时请求"与"从主对话"。未来应升级为基于 **System Prompt 指纹** 判定：
+- 比对新请求头部与主缓存头部
+- 若头部（System Prompt）完全不匹配，则判定为**切换客户端/新话题**，自动重置主缓存
+- 此功能将彻底解决多客户端切换时的缓存污染问题，无需人工重启
+
+### 9.2 [TODO] 多模型分流 (Multi-Model Routing)
+
+支持根据请求中的 `model` 字段或 API endpoint 将请求路由到不同的模型实例：
+- **路由依据**：`payload.model` 字段（如 `claude-3-sonnet` vs `claude-3-haiku`）或 endpoint 路径
+- **实现方式**：在 Python 层维护多个 `LlamaChatWrapper` 实例，按模型名映射
+- **内存开销**：每个模型独立加载权重，适合异构模型场景（如主力模型 + 轻量探测模型）
+- **用例**：模拟云端架构，用大模型处理主对话、小模型处理分类/探测任务
+
+### 9.3 [TODO] 多 Context KV Cache 隔离 (Multi-Context Isolation)
+
+支持单模型多 Context 架构，实现 KV Cache 的物理隔离：
+- **核心思想**：`llama_model` 权重共享，但创建多个 `llama_context`，每个 Context 有独立的 KV Cache
+- **路由依据**：同 9.2，基于 `model` 字段或 endpoint
+- **内存开销**：权重只加载一次，每个 Context 仅需额外的 KV Cache 空间
+- **优势**：
+  - 彻底消除"缓存污染"问题（物理隔离，无需启发式判断）
+  - 比多模型方案更节省内存
+  - 对任何客户端都有效，无需针对 Claude Code 特殊优化
+- **实现要点**：
+  - C++ 层：`LlamaChatWrapper` 支持创建/管理多个 `llama_context`
+  - Python 层：Context 池管理（类似数据库连接池）
+  - API 层：根据请求路由到对应 Context
+
+### 9.4 [TODO] 上下文溢出友好错误 (Context Overflow Error Handling)
+
+当请求的 Token 数量超过 `n_ctx` 限制时，应返回符合 API 规范的错误响应，而非抛出 RuntimeError 导致 500：
+- **Anthropic 格式**：
+  ```json
+  {
+    "type": "error",
+    "error": {
+      "type": "invalid_request_error",
+      "message": "Request exceeds maximum context length. Requested 75612 tokens, but limit is 8192."
+    }
+  }
+  ```
+- **OpenAI 格式**：
+  ```json
+  {
+    "error": {
+      "message": "This model's maximum context length is 8192 tokens. However, your messages resulted in 75612 tokens.",
+      "type": "invalid_request_error",
+      "code": "context_length_exceeded"
+    }
+  }
+  ```
+- **实现要点**：
+  - C++ 层：在 `init_inference` 中检测溢出，抛出特定异常类型（如 `ContextOverflowError`）
+  - Python 层：捕获该异常，根据请求来源的 API 格式返回对应的错误 JSON
+  - HTTP 状态码：`400 Bad Request`（而非 `500 Internal Server Error`）
+
+### 9.5 [BUG] Ephemeral Sequence Batch ID 不匹配 (2026-01-21 发现)
+
+**现象**：当 Claude Code 持续运行一段时间后，模型突然开始输出无意义的重复字符（如 `!!!!!...`），持续数小时无法停止。
+
+**根本原因**：当前的 Ephemeral 序列切换逻辑存在 Bug。在 `init_inference` 中：
+1. 我们正确检测到 Ephemeral 请求并设置 `current_seq_id_ = 1`
+2. 但在创建 `llama_batch` 时，**仍然硬编码使用了 Sequence ID 0**：
+   ```cpp
+   common_batch_add(batch, tokens[i], 
+                    n_keep + i,    // <-- 位置基于 Seq 0 的 n_keep
+                    {0},           // <-- 序列 ID 硬编码为 0！
+                    ...);
+   ```
+3. 结果：Batch 声称 Token 属于 Seq 0 从位置 Y 开始，但 KV Cache 中 Seq 0 的最后位置是 X，且 `Y ≠ X+1`
+4. `llama_decode` 检测到位置不连续，返回 -1（失败）
+5. 模型进入错误状态，输出垃圾数据
+
+**服务器日志特征**：
+```
+DEBUG: Ephemeral request detected (seq_id=1). Not touching main cache.
+init: the tokens of sequence 0 in the input batch have inconsistent sequence positions:
+ - the last position stored in the memory module of the context (i.e. the KV cache) for sequence 0 is X = 507
+ - the tokens for sequence 0 in the input batch have a starting position of Y = 138
+ it is required that the sequence positions remain consecutive: Y = X + 1
+decode: failed to initialize batch
+llama_decode: failed to decode, ret = -1
+```
+
+**修复方向**：
+1. **短期**：修复 `common_batch_add` 调用，使用 `{current_seq_id_}` 而非硬编码 `{0}`，并正确计算 Ephemeral 序列的起始位置
+2. **长期**：采用 9.3 节描述的"多 Context KV Cache 隔离"方案，彻底规避 Sequence 切换的复杂性
+
+**影响**：此 Bug 会导致长时间运行的 Claude Code 会话在触发 Ephemeral 检测后完全失效，需要重启服务器。
 
 ---
 
@@ -247,9 +354,9 @@ logs/
 │  │   ├── /v1/messages         (Anthropic)                   │  │
 │  │   ├── /v1/chat/completions (OpenAI)                      │  │
 │  │   └── /...                 (其他 LiteLLM 支持的格式)      │  │
-│  │       ↓ Python 函数调用                                  │  │
-│  │   LiteLLM（库模式）- 格式识别与转换                       │  │
-│  │       ↓ Python 函数调用                                  │  │
+│  │       ↓ Python method call                               │  │
+│  │   Protocol Adapters (src/adapters/)                      │  │
+│  │       ↓ Python method call                               │  │
 │  │   llama_chat_bindings (pybind11)                         │  │
 │  │       ↓ FFI 调用                                         │  │
 │  │   libllama.dylib + common/chat.h                         │  │
@@ -301,14 +408,17 @@ PYBIND11_MODULE(llama_chat, m) {
 }
 ```
 
-### 13.4 LiteLLM 格式转换层
+### 13.4 Protocol Adapter Pattern (src/adapters/)
 
 ```python
-# src/litellm_adapter.py
-class LiteLLMAdapter:
-    def identify_format(self, request: dict) -> str: ...
-    def to_internal(self, request: dict, format: str) -> dict: ...
-    def from_internal(self, response: dict, target_format: str) -> dict: ...
+# src/adapters/base.py
+class BaseAdapter(ABC):
+    @abstractmethod
+    def to_internal(self, request: dict) -> dict: ...
+    @abstractmethod
+    def from_internal(self, response: dict, original_req: dict) -> dict: ...
+    @abstractmethod
+    def chunk_to_sse(self, chunk: dict) -> str: ...
 ```
 
 ---
@@ -330,13 +440,13 @@ class LiteLLMAdapter:
 git clone --recursive https://github.com/xxx/llama-bridge.git
 cd llama-bridge
 
-# 2. 构建
+# 2. 编译 C++ 组件
 make build
 
-# 3. 安装依赖
+# 3. 初始化环境
 uv sync
 
-# 4. 运行
+# 4. 运行服务
 uv run serve --model models/<path-to-model>.gguf
 ```
 
@@ -345,24 +455,24 @@ uv run serve --model models/<path-to-model>.gguf
 ## 15. 里程碑
 
 ### Phase 1: 基础框架
-- [ ] 项目结构搭建
-- [ ] llama.cpp submodule 配置
-- [ ] 基础构建脚本
+- [x] 项目结构搭建
+- [x] llama.cpp submodule 配置
+- [x] 基础构建脚本
 
 ### Phase 2: C++ Bindings
-- [ ] pybind11 wrapper 实现
-- [ ] chat.h 关键函数暴露
-- [ ] 推理 API 暴露
+- [x] pybind11 wrapper 实现
+- [x] chat.h 关键函数暴露
+- [x] 推理 API 暴露
 
 ### Phase 3: Python 服务
-- [ ] FastAPI 服务器
-- [ ] 格式转换层
-- [ ] 非流式响应
+- [x] FastAPI 服务器
+- [x] 格式转换层
+- [x] 非流式响应
 
 ### Phase 4: 流式支持
-- [ ] 流式生成 binding
-- [ ] SSE 响应实现
-- [ ] 真正的流式工具调用
+- [x] 流式生成 binding
+- [x] SSE 响应实现
+- [x] 真正的流式工具调用
 
 ### Phase 5: 测试与优化
 - [ ] 完整测试套件

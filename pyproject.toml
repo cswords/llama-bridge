@@ -19,10 +19,14 @@ dev = [
     "pytest-httpx>=0.28.0",
     "black>=24.0.0",
     "nodeenv>=1.8.0",
+    "pexpect>=4.9.0",
+    "requests>=2.31.0",
 ]
 
 [project.scripts]
-serve = "server:main"
+serve = "src.server:main"
+cc = "src.cli:run_claude_code"
+hfd = "src.cli:download_model"
 
 [build-system]
 requires = ["hatchling"]
