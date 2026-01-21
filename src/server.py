@@ -11,9 +11,20 @@ from pathlib import Path
 from typing import AsyncGenerator
 
 import uvicorn
-from fastapi import FastAPI, Request, Response
 from fastapi.responses import StreamingResponse, JSONResponse
 from .exceptions import ContextLimitExceededError
+
+# --- Environment Configuration ---
+if sys.platform == "darwin":
+    # Ensure Metal shader cache is persistent for faster startup
+    if "GGML_METAL_SHADER_CACHE_DIR" not in os.environ:
+        import os
+        cache_dir = Path.home() / ".cache" / "llama_bridge" / "metal"
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            os.environ["GGML_METAL_SHADER_CACHE_DIR"] = str(cache_dir)
+        except Exception:
+            pass # Fallback to default (tmp) if permissions fail
 
 from .bridge import Bridge
 from .config import (
