@@ -130,7 +130,7 @@ graph TD
 ```toml
 # 定义模型
 [models.mimo]
-path = "models/MiMo-V2-Flash-GGUF/UD-Q6_K_XL/"
+path = "unsloth/MiMo-V2-Flash-GGUF/UD-Q6_K_XL/"
 
 # 定义主缓存 (用于对话)
 [caches.main]
