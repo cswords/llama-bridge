@@ -6,11 +6,13 @@ Supports Anthropic, OpenAI, and other LiteLLM-compatible formats.
 import argparse
 import logging
 import sys
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncGenerator
 
 import uvicorn
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import StreamingResponse, JSONResponse
 from .exceptions import ContextLimitExceededError
 
@@ -18,7 +20,6 @@ from .exceptions import ContextLimitExceededError
 if sys.platform == "darwin":
     # Ensure Metal shader cache is persistent for faster startup
     if "GGML_METAL_SHADER_CACHE_DIR" not in os.environ:
-        import os
         cache_dir = Path.home() / ".cache" / "llama_bridge" / "metal"
         try:
             cache_dir.mkdir(parents=True, exist_ok=True)
