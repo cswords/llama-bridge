@@ -10,12 +10,14 @@ import re
 import sys
 import time
 import uuid
+import hashlib
 from datetime import datetime
 from pathlib import Path
 from typing import AsyncGenerator, Dict, List, Optional, Any
 
 from .adapters.anthropic import AnthropicAdapter
 from .adapters.openai import OpenAIAdapter
+from .exceptions import ContextLimitExceededError
 
 # Add src/lib (where libllama.dylib is) to DYLD_LIBRARY_PATH dynamically for this process
 # Also add src/ to sys.path so llama_chat.so can be imported
@@ -74,11 +76,28 @@ class Bridge:
     """
     Core bridge between API formats and llama.cpp inference.
     Uses protocol-specific adapters for format conversion.
+    Supports multiple contexts (caches) for KV cache isolation.
     """
     
     def __init__(self, model_path: str, debug: bool = False, mock: bool = False, 
                  n_ctx: int = 0, n_batch: int = 0, n_ubatch: int = 0, 
-                 n_threads: int = 0, flash_attn: bool = False):
+                 n_threads: int = 0, flash_attn: bool = False,
+                 cache_configs: list | None = None):
+        """
+        Initialize the Bridge.
+        
+        Args:
+            model_path: Path to GGUF model file
+            debug: Enable debug logging
+            mock: Use mock inference (no model loaded)
+            n_ctx: Default context size (0 = auto)
+            n_batch: Batch size (0 = auto)
+            n_ubatch: Physical batch size (0 = auto)
+            n_threads: Thread count (0 = auto)
+            flash_attn: Enable Flash Attention
+            cache_configs: List of cache config dicts with 'name' and 'n_ctx' keys.
+                          If None, creates a single 'default' cache.
+        """
         self.model_path = model_path
         self.debug = debug
         self.mock = mock
@@ -87,19 +106,33 @@ class Bridge:
         self.n_ubatch = n_ubatch
         self.n_threads = n_threads
         self.flash_attn = flash_attn
+        self.cache_configs = cache_configs or []
         
         # Initialize adapters directly
         self.anthropic_adapter = AnthropicAdapter()
         self.openai_adapter = OpenAIAdapter()
         
         self.wrapper = None
+        self.cache_metadata = {}
         
         self.check_ready()
         
         if not self.mock:
             import llama_chat
-            self.wrapper = llama_chat.LlamaChatWrapper(model_path, n_ctx, n_batch)
-            logger.info(f"Model loaded from {model_path} (n_ctx={n_ctx}, n_batch={n_batch})")
+            self.wrapper = llama_chat.LlamaChatWrapper(
+                model_path, n_ctx, n_batch, n_ubatch, n_threads, flash_attn
+            )
+            
+            # Create additional contexts if configured
+            for cache_cfg in self.cache_configs:
+                cache_name = cache_cfg.get('name', 'unnamed')
+                cache_n_ctx = cache_cfg.get('n_ctx', 0)
+                if cache_name != 'default':  # 'default' is created automatically
+                    self.wrapper.create_context(cache_name, cache_n_ctx)
+                    logger.info(f"Created context '{cache_name}' with n_ctx={cache_n_ctx}")
+            
+            logger.info(f"Model loaded from {model_path}")
+            logger.info(f"Available contexts: {self.wrapper.list_contexts()}")
         else:
             logger.info("Running in MOCK mode")
 
@@ -141,15 +174,20 @@ class Bridge:
         
         logger.debug(f"Logged Step {stage}: {filename}")
     
-    async def complete_anthropic(self, request: dict) -> str:
-        """Handle non-streaming Anthropic request."""
+    async def complete_anthropic(self, request: dict, cache_name: str | None = None) -> str:
+        """Handle non-streaming Anthropic request.
+        
+        Args:
+            request: The Anthropic API request
+            cache_name: Target cache name for routing (for future multi-context support)
+        """
         log_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         self._log_request(1, "req_client_raw", request, log_id)
         
         internal_req = self.anthropic_adapter.to_internal(request)
         self._log_request(2, "req_model", internal_req, log_id)
         
-        internal_res = await self._generate(internal_req)
+        internal_res = await self._generate(internal_req, cache_name=cache_name)
         self._log_request(3, "res_model_raw", internal_res, log_id)
         
         response = self.anthropic_adapter.from_internal(internal_res, request)
@@ -157,15 +195,20 @@ class Bridge:
         
         return json.dumps(response, ensure_ascii=False)
     
-    async def complete_openai(self, request: dict) -> str:
-        """Handle non-streaming OpenAI request."""
+    async def complete_openai(self, request: dict, cache_name: str | None = None) -> str:
+        """Handle non-streaming OpenAI request.
+        
+        Args:
+            request: The OpenAI API request
+            cache_name: Target cache name for routing (for future multi-context support)
+        """
         log_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         self._log_request(1, "req_client_raw", request, log_id)
         
         internal_req = self.openai_adapter.to_internal(request)
         self._log_request(2, "req_model", internal_req, log_id)
         
-        internal_res = await self._generate(internal_req)
+        internal_res = await self._generate(internal_req, cache_name=cache_name)
         self._log_request(3, "res_model_raw", internal_res, log_id)
         
         response = self.openai_adapter.from_internal(internal_res, request)
@@ -173,8 +216,13 @@ class Bridge:
         
         return json.dumps(response, ensure_ascii=False)
     
-    async def stream_anthropic(self, request: dict) -> AsyncGenerator[str, None]:
-        """Handle streaming Anthropic request."""
+    async def stream_anthropic(self, request: dict, cache_name: str | None = None) -> AsyncGenerator[str, None]:
+        """Handle streaming Anthropic request.
+        
+        Args:
+            request: The Anthropic API request
+            cache_name: Target cache name for routing (for future multi-context support)
+        """
         log_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         self._log_request(1, "req_client_raw", request, log_id)
         
@@ -187,7 +235,7 @@ class Bridge:
             "active_block_type": None,
             "current_block_index": 0
         }
-        async for chunk in self._stream_generate(internal_req):
+        async for chunk in self._stream_generate(internal_req, cache_name=cache_name):
             if "content" in chunk:
                 full_content += chunk["content"]
             event = self.anthropic_adapter.chunk_to_sse(chunk, state)
@@ -197,8 +245,13 @@ class Bridge:
         # Final log for stream
         self._log_request(3, "res_model_full", {"full_content": full_content}, log_id)
     
-    async def stream_openai(self, request: dict) -> AsyncGenerator[str, None]:
-        """Handle streaming OpenAI request."""
+    async def stream_openai(self, request: dict, cache_name: str | None = None) -> AsyncGenerator[str, None]:
+        """Handle streaming OpenAI request.
+        
+        Args:
+            request: The OpenAI API request
+            cache_name: Target cache name for routing (for future multi-context support)
+        """
         log_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         self._log_request(1, "req_client_raw", request, log_id)
         
@@ -207,7 +260,7 @@ class Bridge:
         
         full_content = ""
         state = {} # OpenAI is stateless for now
-        async for chunk in self._stream_generate(internal_req):
+        async for chunk in self._stream_generate(internal_req, cache_name=cache_name):
             if "content" in chunk:
                 full_content += chunk["content"]
             event = self.openai_adapter.chunk_to_sse(chunk, state)
@@ -241,10 +294,54 @@ class Bridge:
             normalized.append(n_msg)
         return normalized
 
-    async def _generate(self, internal_req: dict) -> dict:
-        """Execute non-streaming generation."""
-        if self.mock:
+    def _extract_system_hash(self, messages: List[Dict[str, Any]]) -> str:
+        """Calculate hash of all system messages combined."""
+        system_content = ""
+        for msg in messages:
+            if msg.get("role") == "system":
+                content = msg.get("content", "")
+                if isinstance(content, list): # Handle structured content
+                    system_content += str(content)
+                else:
+                    system_content += str(content)
+        return hashlib.md5(system_content.encode()).hexdigest()
+
+    def _check_system_prompt(self, internal_req: dict, cache_name: str | None):
+        """Check if system prompt changed for the given cache."""
+        if not cache_name:
+            return
+            
+        current_hash = self._extract_system_hash(internal_req.get("messages", []))
+        
+        if cache_name not in self.cache_metadata:
+            self.cache_metadata[cache_name] = {"system_hash": current_hash}
+        else:
+            last_hash = self.cache_metadata[cache_name].get("system_hash")
+            if last_hash != current_hash:
+                # Only warn if previous hash existed (not first request)
+                if last_hash:
+                    logger.warning(f"System prompt changed for cache '{cache_name}'. This will cause cache invalidation.")
+                self.cache_metadata[cache_name]["system_hash"] = current_hash
+
+    async def _generate(self, internal_req: dict, cache_name: str | None = None) -> dict:
+        """Execute non-streaming generation.
+        
+        Args:
+            internal_req: Internal request format
+            cache_name: Target cache/context name. If None, uses active context.
+        """
+        # Check system prompt consistency
+        self._check_system_prompt(internal_req, cache_name)
+
+        if self.mock and not self.wrapper:
             return self._mock_generate(internal_req)
+
+        # Select the target context if specified
+        if cache_name and self.wrapper:
+            try:
+                self.wrapper.select_context(cache_name)
+            except RuntimeError as e:
+                logger.warning(f"Failed to select context '{cache_name}': {e}. Using active context.")
 
         # 1. Apply template
         tools = []
@@ -275,10 +372,21 @@ class Bridge:
         logger.info(f"[Non-Streaming] Template applied in {t1 - t0:.3f}s. Prompt length: {len(template_res['prompt'])}")
         
         # 2. Generate text
-        raw_response = self.wrapper.generate(
-            template_res["prompt"],
-            internal_req.get("max_tokens", 4096)
-        )
+        try:
+            raw_response = self.wrapper.generate(
+                template_res["prompt"],
+                internal_req.get("max_tokens", 4096)
+            )
+        except RuntimeError as e:
+            msg = str(e)
+            if "ContextLimitExceeded" in msg:
+                # msg format: "ContextLimitExceeded: Request (N tokens) exceeds context limit (M)"
+                match = re.search(r"Request \((\d+) tokens\) exceeds context limit \((\d+)\)", msg)
+                if match:
+                    requested = int(match.group(1))
+                    limit = int(match.group(2))
+                    raise ContextLimitExceededError(limit, requested, cache_name or "unknown")
+            raise e
         t2 = time.time()
         logger.info(f"[Non-Streaming] Generation complete in {t2 - t1:.3f}s.")
         
@@ -336,12 +444,27 @@ class Bridge:
             }
         }
 
-    async def _stream_generate(self, internal_req: dict) -> AsyncGenerator[dict, None]:
-        """Call llama.cpp for streaming generation."""
+    async def _stream_generate(self, internal_req: dict, cache_name: str | None = None) -> AsyncGenerator[dict, None]:
+        """Call llama.cpp for streaming generation.
+        
+        Args:
+            internal_req: Internal request format
+            cache_name: Target cache/context name. If None, uses active context.
+        """
+        # Check system prompt consistency
+        self._check_system_prompt(internal_req, cache_name)
+
         if self.mock and not self.wrapper:
             yield {"content": "Mock streaming content.", "stop_reason": None}
             yield {"content": "", "stop_reason": "end_turn"}
             return
+
+        # Select the target context if specified
+        if cache_name and self.wrapper:
+            try:
+                self.wrapper.select_context(cache_name)
+            except RuntimeError as e:
+                logger.warning(f"Failed to select context '{cache_name}': {e}. Using active context.")
 
         # 1. Apply template
         tools = []
@@ -374,7 +497,20 @@ class Bridge:
         
         # 2. Init inference
         logger.info("Step 2: Initializing inference (Prefill)...")
-        self.wrapper.init_inference(template_res["prompt"])
+        try:
+            self.wrapper.init_inference(
+                template_res["prompt"],
+                internal_req.get("max_tokens", 0) or 0
+            )
+        except RuntimeError as e:
+            msg = str(e)
+            if "ContextLimitExceeded" in msg:
+                match = re.search(r"Request \((\d+) tokens\) exceeds context limit \((\d+)\)", msg)
+                if match:
+                    requested = int(match.group(1))
+                    limit = int(match.group(2))
+                    raise ContextLimitExceededError(limit, requested, cache_name or "unknown")
+            raise e
         t2 = time.time()
         logger.info(f"Inference initialized (Prefill complete) in {t2 - t1:.3f}s. Starting token generation...")
         
@@ -448,6 +584,12 @@ class Bridge:
                                     curr_content += "\n" + tail[:second_block.start()].strip()
                                 else:
                                     curr_content += "\n" + tail.strip()
+                                
+                                # Strip leading newline if it was empty before
+                                curr_content = curr_content.strip()
+                    else:
+                        # If reasoning was already extracted by C++, trust the content provided by C++
+                        curr_content = parsed.get("content", "")
                 else:
                     # It's a tool call start. If it's closed, check for text after it.
                     # Qwen uses <tool_call>...</tool_call> or just <function=...>...</function>
@@ -473,6 +615,8 @@ class Bridge:
             # curr_reasoning = curr_reasoning.strip()
             
             # 2. Handle Thoughts (Reasoning)
+            if self.debug:
+                logger.debug(f"[Stream] Raw len: {len(full_raw)}, Content: '{curr_content}' ({len(curr_content)}), Reasoning: '{curr_reasoning}' ({len(curr_reasoning)})")
             if len(curr_reasoning) > last_reasoning_pos:
                 delta = curr_reasoning[last_reasoning_pos:]
                 yield {"thought": delta, "stop_reason": None}

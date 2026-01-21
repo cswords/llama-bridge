@@ -55,10 +55,23 @@ uv run serve --model models/bartowski/Llama-3.1-8B-Instruct-GGUF/Llama-3.1-8B-In
 启动 FastAPI 推理服务，支持 Anthropic 和 OpenAI API 格式。
 
 ```bash
+# 使用配置文件启动（推荐）
+uv run serve --config configs/claude-code.toml
+
+# 或使用命令行参数启动
 uv run serve --model <path> [options]
 ```
 
-#### 必需参数
+#### 配置文件优先
+
+当使用 `--config` 指定配置文件时，与模型相关的 CLI 参数（`--model`, `--n-ctx`）将被忽略。
+配置文件使用 TOML 格式，支持多缓存路由。参见 `configs/claude-code.toml` 示例。
+
+| 参数 | 说明 |
+|------|------|
+| `--config <path>` | TOML 配置文件路径。启用多缓存路由，推荐用于 Claude Code。 |
+
+#### 传统参数（如果未使用 --config）
 
 | 参数 | 说明 |
 |------|------|
@@ -86,6 +99,9 @@ uv run serve --model <path> [options]
 #### 示例
 
 ```bash
+# 使用配置文件（推荐，支持多缓存隔离）
+uv run serve --config configs/claude-code.toml --debug
+
 # 基础启动
 uv run serve --model bartowski/Llama-3.1-8B-Instruct-GGUF
 

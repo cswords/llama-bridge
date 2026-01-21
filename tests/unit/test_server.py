@@ -66,7 +66,7 @@ class TestSSEChunkConversion:
         adapter = AnthropicAdapter()
         
         chunk = {"content": "Hello", "stop_reason": None}
-        sse = adapter.chunk_to_sse(chunk)
+        sse = adapter.chunk_to_sse(chunk, {})
         
         assert "event: content_block_delta" in sse
         assert "text_delta" in sse
@@ -78,7 +78,7 @@ class TestSSEChunkConversion:
         adapter = AnthropicAdapter()
         
         chunk = {"thought": "Let me think...", "stop_reason": None}
-        sse = adapter.chunk_to_sse(chunk)
+        sse = adapter.chunk_to_sse(chunk, {})
         
         assert "event: content_block_delta" in sse
         assert "thinking_delta" in sse
@@ -90,7 +90,7 @@ class TestSSEChunkConversion:
         adapter = AnthropicAdapter()
         
         chunk = {"content": "", "stop_reason": "end_turn", "usage": {"output_tokens": 10}}
-        sse = adapter.chunk_to_sse(chunk)
+        sse = adapter.chunk_to_sse(chunk, {})
         
         assert "message_delta" in sse
         assert "end_turn" in sse
@@ -111,7 +111,7 @@ class TestSSEChunkConversion:
             }],
             "usage": {"output_tokens": 15}
         }
-        sse = adapter.chunk_to_sse(chunk)
+        sse = adapter.chunk_to_sse(chunk, {})
         
         assert "content_block_start" in sse
         assert "tool_use" in sse

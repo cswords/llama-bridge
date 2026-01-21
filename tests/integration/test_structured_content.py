@@ -105,20 +105,27 @@ class TestBridgeStructuredContent:
         text_deltas = [e for e in events if "text_delta" in e]
         
         assert len(thinking_deltas) > 0
-        assert len(text_deltas) > 0
+        assert len(text_deltas) > 0, f"Events: {events}"
         
-        # Check cumulative thinking content
-        full_thinking = ""
-        for d in thinking_deltas:
-            data = json.loads(d.split("data: ")[1])
-            full_thinking += data["delta"]["thinking"]
+        # Helper to extract deltas from potential multi-event strings
+        def extract_deltas(event_list, delta_type):
+            content = ""
+            for event_str in event_list:
+                for line in event_str.splitlines():
+                   if line.startswith("data: "):
+                       try:
+                           data = json.loads(line[6:])
+                           if "delta" in data and data["delta"].get("type") == delta_type:
+                               key = "thinking" if delta_type == "thinking_delta" else "text"
+                               content += data["delta"].get(key, "")
+                       except json.JSONDecodeError:
+                           pass
+            return content
+
+        full_thinking = extract_deltas(thinking_deltas, "thinking_delta")
         assert "I am thinking" in full_thinking
         
-        # Check cumulative text content
-        full_text = ""
-        for d in text_deltas:
-            data = json.loads(d.split("data: ")[1])
-            full_text += data["delta"]["text"]
+        full_text = extract_deltas(text_deltas, "text_delta")
         assert "I am done." in full_text
 
     async def test_streaming_tool_calls(self, bridge, mock_wrapper):

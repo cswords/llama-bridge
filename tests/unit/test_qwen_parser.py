@@ -11,6 +11,7 @@ class TestQwenToolCallParser:
     def test_single_tool_call(self):
         """Should parse a single tool call."""
         from src.bridge import _parse_qwen_tool_calls
+        import json
         
         raw = """<tool_call>
 <function=get_weather>
@@ -22,12 +23,13 @@ class TestQwenToolCallParser:
         
         assert len(result) == 1
         assert result[0]["name"] == "get_weather"
-        assert result[0]["arguments"] == {"city": "Tokyo"}
+        assert json.loads(result[0]["arguments"]) == {"city": "Tokyo"}
         assert "id" in result[0]
     
     def test_multiple_parameters(self):
         """Should parse multiple parameters."""
         from src.bridge import _parse_qwen_tool_calls
+        import json
         
         raw = """<function=search>
 <parameter=query>python tutorial</parameter>
@@ -38,8 +40,9 @@ class TestQwenToolCallParser:
         
         assert len(result) == 1
         assert result[0]["name"] == "search"
-        assert result[0]["arguments"]["query"] == "python tutorial"
-        assert result[0]["arguments"]["limit"] == 10  # Should be parsed as int
+        args = json.loads(result[0]["arguments"])
+        assert args["query"] == "python tutorial"
+        assert args["limit"] == 10  # Should be parsed as int
     
     def test_multiple_tool_calls(self):
         """Should parse multiple tool calls."""
@@ -69,6 +72,7 @@ class TestQwenToolCallParser:
     def test_json_parameter_value(self):
         """Should parse JSON values in parameters."""
         from src.bridge import _parse_qwen_tool_calls
+        import json
         
         raw = """<function=create_file>
 <parameter=path>/tmp/test.json</parameter>
@@ -79,4 +83,5 @@ class TestQwenToolCallParser:
         
         assert len(result) == 1
         # JSON should be parsed
-        assert result[0]["arguments"]["content"] == {"key": "value"}
+        args = json.loads(result[0]["arguments"])
+        assert args["content"] == {"key": "value"}

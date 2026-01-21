@@ -1,0 +1,53 @@
+# Llama-Bridge Configuration for Claude Code
+# 
+# This configuration file optimizes Llama-Bridge for use with Claude Code CLI.
+# It creates separate KV caches for main conversations and background tasks,
+# preventing cache pollution between different request types.
+
+# ============================================================
+# Model Definition
+# Currently only one model is supported, but format allows future expansion
+# ============================================================
+[models.mimo]
+path = "unsloth/MiMo-V2-Flash-GGUF/UD-Q6_K_XL/"
+
+# ============================================================
+# Cache Definitions
+# Each cache = independent llama_context with its own KV cache
+# ============================================================
+
+[caches.main]
+model = "mimo"
+n_ctx = 262144                     # 256K for main conversation
+description = "Main conversation (Sonnet-level)"
+
+[caches.fast]
+model = "mimo"
+n_ctx = 16384                      # 16K for background tasks
+description = "Background tasks (Haiku-level)"
+
+# ============================================================
+# Routing Rules
+# Priority: endpoint > model (exact) > match (wildcard)
+# First matching rule wins
+# ============================================================
+
+# Token counting uses minimal resources
+[[routes]]
+endpoint = "/v1/messages/count_tokens"
+cache = "fast"
+
+# Claude Code's Haiku model requests → fast cache
+[[routes]]
+match = "*haiku*"
+cache = "fast"
+
+# Claude Code's small/fast model requests → fast cache  
+[[routes]]
+match = "*small*"
+cache = "fast"
+
+# All other requests → main cache
+[[routes]]
+match = "*"
+cache = "main"
