@@ -42,15 +42,18 @@ def download_model():
     os.makedirs(os.path.dirname(local_dir), exist_ok=True)
     
     # Run hfd.sh (download if missing)
-    script_path = os.path.join("scripts", "hfd.sh")
+    # Put it in a dedicated scripts/ folder in the root, outside of Python source
+    root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    script_path = os.path.join(root_dir, "scripts", "hfd.sh")
+    
     if not os.path.exists(script_path):
-        print(f"hfd.sh not found. Downloading from web...")
-        os.makedirs("scripts", exist_ok=True)
-        url = "https://gist.githubusercontent.com/Gwada26/f67d4b4a15993883a4c4/raw/hfd.sh" # Valid HFD script source
+        print(f"hfd.sh not found. Downloading to {script_path}...")
+        os.makedirs(os.path.dirname(script_path), exist_ok=True)
+        url = "https://gist.githubusercontent.com/Gwada26/f67d4b4a15993883a4c4/raw/hfd.sh"
         subprocess.run(["curl", "-s", "-o", script_path, url], check=True)
         subprocess.run(["chmod", "+x", script_path], check=True)
         
-    cmd = [f"./{script_path}", repo_id, "--local-dir", local_dir] + args
+    cmd = [script_path, repo_id, "--local-dir", local_dir] + args
     subprocess.run(cmd)
 
 

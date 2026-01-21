@@ -1,16 +1,22 @@
-
 import os
 import sys
+from pathlib import Path
 
-# Setup paths like bridge.py does
-_src_dir = os.path.abspath("src")
-sys.path.insert(0, _src_dir)
+# Setup paths to find compiled llama_chat binding in parent directory (src/)
+_utils_dir = Path(__file__).parent.absolute()
+_src_dir = _utils_dir.parent
+
+if str(_src_dir) not in sys.path:
+    sys.path.insert(0, str(_src_dir))
+
 if sys.platform == "darwin":
-    lib_path = os.path.join(_src_dir, "lib")
+    lib_path = _src_dir / "lib"
     if "DYLD_LIBRARY_PATH" not in os.environ:
-        os.environ["DYLD_LIBRARY_PATH"] = lib_path
+        os.environ["DYLD_LIBRARY_PATH"] = str(lib_path)
     else:
-        os.environ["DYLD_LIBRARY_PATH"] = lib_path + ":" + os.environ["DYLD_LIBRARY_PATH"]
+        path = str(lib_path)
+        if path not in os.environ["DYLD_LIBRARY_PATH"]:
+            os.environ["DYLD_LIBRARY_PATH"] = f"{path}:{os.environ['DYLD_LIBRARY_PATH']}"
 
 import llama_chat
 
