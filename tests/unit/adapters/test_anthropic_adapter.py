@@ -1,11 +1,9 @@
 """
-Unit tests for protocol adapters (Anthropic, OpenAI).
+Unit tests for Anthropic protocol adapter.
 """
 
 import pytest
-
 from src.adapters.anthropic import AnthropicAdapter
-from src.adapters.openai import OpenAIAdapter
 
 class TestAnthropicAdapter:
     """Test AnthropicAdapter conversion logic."""
@@ -61,27 +59,61 @@ class TestAnthropicAdapter:
         assert result["content"][1]["type"] == "text"
         assert result["content"][1]["text"] == "The answer is 4."
 
-class TestOpenAIAdapter:
-    """Test OpenAIAdapter conversion logic."""
+
+class TestAnthropicSSEConversion:
+    """Test SSE chunk conversion for Anthropic adapter."""
     
-    def setup_method(self):
-        self.adapter = OpenAIAdapter()
+    def test_text_delta_sse(self):
+        """Should format text delta as SSE event."""
+        adapter = AnthropicAdapter()
+        
+        chunk = {"content": "Hello", "stop_reason": None}
+        sse = adapter.chunk_to_sse(chunk, {})
+        
+        assert "event: content_block_delta" in sse
+        assert "text_delta" in sse
+        assert "Hello" in sse
     
-    def test_to_internal(self):
-        """OpenAI request is already internal."""
-        request = {"messages": [{"role": "user", "content": "Hi"}]}
-        assert self.adapter.to_internal(request) == request
+    def test_thinking_delta_sse(self):
+        """Should format thinking delta as SSE event."""
+        adapter = AnthropicAdapter()
+        
+        chunk = {"thought": "Let me think...", "stop_reason": None}
+        sse = adapter.chunk_to_sse(chunk, {})
+        
+        assert "event: content_block_delta" in sse
+        assert "thinking_delta" in sse
+        assert "Let me think..." in sse
     
-    def test_from_internal(self):
-        """Should convert internal response to OpenAI format."""
-        response = {
-            "content": "Hi!",
-            "stop_reason": "stop",
-            "usage": {"input_tokens": 5, "output_tokens": 2}
+    def test_final_message_delta_sse(self):
+        """Should format final message delta with stop_reason."""
+        adapter = AnthropicAdapter()
+        
+        chunk = {"content": "", "stop_reason": "end_turn", "usage": {"output_tokens": 10}}
+        sse = adapter.chunk_to_sse(chunk, {})
+        
+        assert "message_delta" in sse
+        assert "end_turn" in sse
+        assert "message_stop" in sse
+    
+    def test_tool_use_sse(self):
+        """Should format tool use as SSE events."""
+        adapter = AnthropicAdapter()
+        
+        chunk = {
+            "content": "",
+            "stop_reason": "tool_use",
+            "tool_calls": [{
+                "id": "toolu_123",
+                "name": "get_weather",
+                "arguments": {"location": "Tokyo"}
+            }],
+            "usage": {"output_tokens": 15}
         }
-        original_request = {"model": "gpt-4"}
+        sse = adapter.chunk_to_sse(chunk, {})
         
-        result = self.adapter.from_internal(response, original_request)
-        
-        assert result["choices"][0]["message"]["content"] == "Hi!"
-        assert result["object"] == "chat.completion"
+        assert "content_block_start" in sse
+        assert "tool_use" in sse
+        assert "get_weather" in sse
+        assert "input_json_delta" in sse
+        assert "Tokyo" in sse 
