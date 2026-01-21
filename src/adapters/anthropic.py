@@ -104,6 +104,10 @@ class AnthropicAdapter(BaseAdapter):
                 "input": tc["arguments"] if isinstance(tc["arguments"], dict) else json.loads(tc["arguments"]),
             })
         
+        # Ensure content is never empty (some clients strict validation)
+        if not content_blocks:
+            content_blocks.append({"type": "text", "text": ""})
+        
         u = response.get("usage", {})
         usage_obj = Usage(
             prompt_tokens=u.get("input_tokens", 0),
