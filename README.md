@@ -211,14 +211,15 @@ uv run build
 
 ## 性能测试与验证 (Performance & Benchmarks)
 
-我们在 Mac Studio (M3 Ultra) 上对以下模型配置进行了端到端验证（2026-01-21）：
+我们在 Mac Studio (M3 Ultra) 上对以下模型配置进行了端到端验证（2026-01-22）：
 
 | 模型配置 | 规模 | 量化 | 启动耗时 | Cold (E2E) | Hot (E2E) |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Qwen 2.5 3B** | 3B | Q4_K_M | ~3.0s | ~10.2s | ~1.0s |
-| **Qwen3-Coder-30B** | 30B | Q5_K_M | ~5.0s | ~25.5s | ~6.1s |
-| **MiMo-V2-Flash** | ~70B | UD-Q6_XL | ~17.0s | ~78.9s | ~9.0s |
-| **GLM-4.7-REAP** | 218B | Q2_K | ~32.1s | ~156.0s | ~20.6s |
+| **Qwen 2.5 3B** | 3B | Q4_K_M | ~5.0s | ~10.9s | ~1.6s |
+| **Qwen3-Coder-30B** | 30B | Q5_K_M | ~15.1s | ~25.1s | ~5.6s |
+| **MiMo-V2-Flash** | ~70B | UD-Q6_XL | ~17.1s | ~78.3s | ~9.1s |
+| **MiniMax-M2.1** | ~456B | Q8_0 | ~105.5s | ~62.6s | ~9.3s |
+| **GLM-4.7-REAP** | ~218B | Q2_K | ~42.2s | ~161.1s | ~21.0s |
 
 > **测试说明**: 
 > - 以上数据基于 Mac Studio (M3 Ultra) 环境。

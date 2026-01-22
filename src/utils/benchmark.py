@@ -14,10 +14,11 @@ CONFIGS = [
     "configs/qwen2.5-3b.toml",
     "configs/qwen30b-coder.toml",
     "configs/mimo-v2.toml",
+    "configs/minimax-m2.1.toml",
     "configs/glm4-reap.toml"
 ]
 
-def wait_for_server(url, timeout=60):
+def wait_for_server(url, timeout=120):
     start = time.time()
     while time.time() - start < timeout:
         try:
