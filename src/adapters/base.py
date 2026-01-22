@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Llama-Bridge Authors.
+# This software is released under the GNU General Public License v3.0.
+# See the LICENSE file in the project root for full license information.
+
 """
 Base class for all API adapters.
 Defines the interface for protocol-specific conversions.

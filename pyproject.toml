@@ -3,6 +3,7 @@ name = "llama-bridge"
 version = "0.1.0"
 description = "GGUF Model Inference with Universal API Support"
 readme = "README.md"
+license = {text = "GPL-3.0-only"}
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.109.0",
