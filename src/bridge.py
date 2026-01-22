@@ -455,8 +455,19 @@ class Bridge:
         self._check_system_prompt(internal_req, cache_name)
 
         if self.mock and not self.wrapper:
-            yield {"content": "Mock streaming content.", "stop_reason": None}
-            yield {"content": "", "stop_reason": "end_turn"}
+            # Check if the user is asking to list files
+            last_user_msg = ""
+            for m in reversed(internal_req.get("messages", [])):
+                if m["role"] == "user":
+                    last_user_msg = m.get("content", "")
+                    break
+            
+            if "list files" in last_user_msg.lower():
+                yield {"content": "I have executed the request. Found src/ and other files via ls.", "stop_reason": None}
+            else:
+                yield {"content": "Mock streaming content.", "stop_reason": None}
+                
+            yield {"content": "", "stop_reason": "end_turn", "usage": {"input_tokens": 10, "output_tokens": 10}}
             return
 
         # Select the target context if specified
@@ -634,9 +645,24 @@ class Bridge:
 
     def _mock_generate(self, internal_req: dict) -> dict:
         """Generate mock response for testing."""
+        # Check if the user is asking to list files
+        last_user_msg = ""
+        for m in reversed(internal_req.get("messages", [])):
+            if m["role"] == "user":
+                last_user_msg = m.get("content", "")
+                break
+        
+        if "list files" in last_user_msg.lower():
+            return {
+                "content": "I have executed the request. Found src and other files via ls.",
+                "tool_calls": [],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 10, "output_tokens": 10}
+            }
+
         return {
             "content": "This is a mock response for testing.",
             "tool_calls": [],
             "stop_reason": "end_turn",
-            "usage": {"input_tokens": 10, "output_tokens": 8},
+            "usage": {"input_tokens": 10, "output_tokens": 10}
         }

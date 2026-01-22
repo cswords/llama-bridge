@@ -110,8 +110,8 @@ graph TD
 
 2. **编译 C++ 绑定**:
    ```bash
-   make build
-   # 这将生成 llama_chat_wrapper.cpython-*.so 并放入 src/ 目录
+   uv run build
+   # 这将自动同步 llama.cpp (git submodule) 并生成绑定文件
    ```
 
 3. **安装 Python 依赖**:

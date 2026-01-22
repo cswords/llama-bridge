@@ -263,13 +263,11 @@ public:
     common_chat_params params =
         common_chat_templates_apply(templates_.get(), dummy_inputs);
 
-    common_chat_syntax syntax;
-    syntax.format = params.format;
+    common_chat_parser_params syntax(params);
     if (!params.parser.empty()) {
       syntax.parser.load(params.parser);
     }
     syntax.parse_tool_calls = true;
-    syntax.thinking_forced_open = params.thinking_forced_open;
     syntax.reasoning_format = COMMON_REASONING_FORMAT_AUTO;
 
     common_chat_msg parsed;

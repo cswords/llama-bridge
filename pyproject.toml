@@ -27,6 +27,7 @@ dev = [
 serve = "src.server:main"
 cc = "src.cli:run_claude_code"
 hfd = "src.cli:download_model"
+build = "src.cli:build"
 
 [build-system]
 requires = ["hatchling"]

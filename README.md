@@ -27,7 +27,11 @@ uv sync --all-extras
 项目需要编译 `llama.cpp` 及其 Python 绑定：
 
 ```bash
-make build
+# 默认构建 master 分支
+uv run build
+
+# 构建指定分支或 Tag
+uv run build --branch b4540
 ```
 
 ### 3. 下载模型
@@ -192,7 +196,7 @@ uv run cc --cwd /path/to/project
 uv run pytest
 
 # 重新构建绑定 (如果 llama.cpp 更新)
-make build
+uv run build
 ```
 
 ## 技术架构
