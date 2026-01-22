@@ -18,7 +18,7 @@ CONFIGS = [
     "configs/glm4-reap.toml"
 ]
 
-def wait_for_server(url, timeout=120):
+def wait_for_server(url, timeout=300):
     start = time.time()
     while time.time() - start < timeout:
         try:

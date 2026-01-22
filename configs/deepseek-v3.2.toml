@@ -2,29 +2,28 @@
 # This software is released under the GNU General Public License v3.0.
 # See the LICENSE file in the project root for full license information.
 
-# Llama-Bridge Configuration for MiniMax-M2.1 (Q8_0)
+# Llama-Bridge Configuration for DeepSeek-V3.2 (MXFP4)
 # 
-# MiniMax-M2.1 is a powerful MoE model with extremely long context support.
-# The model natively supports up to 1M+ tokens context, but is capped here
-# for practical memory management on consumer hardware.
+# DeepSeek-V3.2 is a 685B MoE model with 37B active parameters.
+# It supports up to 163K context length natively.
 
 # ============================================================
 # Model Definition
 # ============================================================
-[models.minimax]
-path = "unsloth/MiniMax-M2.1-GGUF/Q8_0/"
+[models.deepseek]
+path = "stevescot1979/DeepSeek-V3.2-MXFP4-GGUF/DeepSeek-V3.2-MXFP4.gguf"
 
 # ============================================================
 # Cache Definitions
 # ============================================================
 
 [caches.main]
-model = "minimax"
+model = "deepseek"
 n_ctx = 131072                     # 128K Context for main tasks
 description = "Main conversation"
 
 [caches.fast]
-model = "minimax"
+model = "deepseek"
 n_ctx = 32768                       # 32K Context for background/fast tasks
 description = "Background tasks"
 
