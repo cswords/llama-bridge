@@ -72,27 +72,74 @@ def build():
     llama_dir = root_dir / "vendor" / "llama.cpp"
     bindings_dir = root_dir / "bindings"
     
-    # Get branch if specified
-    branch = "master"
+    branch = None
     if "--branch" in sys.argv:
         try:
             branch = sys.argv[sys.argv.index("--branch") + 1]
         except IndexError:
             pass
+            
+    # --update flag means find the latest release tag
+    if "--update" in sys.argv and not branch:
+        print("--- Checking for latest llama.cpp release tag ---")
+        if not (llama_dir / ".git").exists():
+            subprocess.run(["git", "submodule", "update", "--init", "--recursive"], cwd=root_dir, check=True)
+        
+        # Fetch tags from origin
+        subprocess.run(["git", "fetch", "origin", "--tags"], cwd=llama_dir, check=True)
+        
+        # Find latest tag starting with 'b' (llama.cpp release format)
+        # Using git tag --sort=-creatordate to get most recent
+        result = subprocess.run(
+            ["git", "tag", "--list", "b*", "--sort=-creatordate"],
+            cwd=llama_dir, capture_output=True, text=True
+        )
+        tags = result.stdout.strip().splitlines()
+        
+        if tags:
+            branch = tags[0]
+            print(f"Found latest release: {branch}")
+        else:
+            print("Warning: No release tags found, falling back to master")
+            branch = "master"
 
-    print(f"--- Synchronizing llama.cpp ({branch}) ---")
-    if not (llama_dir / ".git").exists():
+    if branch:
+        print(f"--- Synchronizing llama.cpp (Branch: {branch}) ---")
+        if not (llama_dir / ".git").exists():
+            subprocess.run(["git", "submodule", "update", "--init", "--recursive"], cwd=root_dir, check=True)
+            
+        print(f"Fetching and checking out branch: {branch}")
+        subprocess.run(["git", "fetch", "origin"], cwd=llama_dir, check=True)
+        subprocess.run(["git", "checkout", branch], cwd=llama_dir, check=True)
+        # Only pull if it looks like a branch name (simplistic check)
+        try:
+            subprocess.run(["git", "pull", "origin", branch], cwd=llama_dir, check=True)
+        except subprocess.CalledProcessError:
+            print(f"Note: Could not pull '{branch}', continuing (might be a tag or detached HEAD).")
+    else:
+        print("--- Synchronizing llama.cpp (Pinned Submodule) ---")
+        # Just ensure the submodule is initialized and matches the pinned commit
         subprocess.run(["git", "submodule", "update", "--init", "--recursive"], cwd=root_dir, check=True)
+        
+    # Get current version info (tag + commit)
+    result = subprocess.run(
+        ["git", "describe", "--tags", "--always", "--long"], 
+        cwd=llama_dir, 
+        capture_output=True, 
+        text=True
+    )
+    version_info = result.stdout.strip()
     
-    # Sync to branch/tag
-    print(f"Fetching and checking out branch: {branch}")
-    subprocess.run(["git", "fetch", "origin"], cwd=llama_dir, check=True)
-    subprocess.run(["git", "checkout", branch], cwd=llama_dir, check=True)
-    # Only pull if it's a branch, if it's a tag this might fail or do nothing
-    try:
-        subprocess.run(["git", "pull", "origin", branch], cwd=llama_dir, check=True)
-    except subprocess.CalledProcessError:
-        print(f"Note: Could not pull '{branch}', continuing (might be a tag or detached HEAD).")
+    # Also get specific commit hash for precision
+    result_hash = subprocess.run(
+        ["git", "rev-parse", "--short", "HEAD"], 
+        cwd=llama_dir, 
+        capture_output=True, 
+        text=True
+    )
+    current_commit = result_hash.stdout.strip()
+    
+    print(f"✅ Using llama.cpp version: {version_info} ({current_commit})")
 
     print("--- Building llama.cpp ---")
     cmake_cmd = ["cmake", "-B", "build", "-DBUILD_SHARED_LIBS=ON", "-DGGML_METAL=ON"]
