@@ -99,6 +99,7 @@ def build():
     # Get pybind11 cmake dir
     import pybind11
     pybind_dir = pybind11.get_cmake_dir()
+    print(f"Using pybind11 from: {pybind_dir}")
     
     bindings_cmake = [
         "cmake", "-B", "build",
@@ -107,8 +108,14 @@ def build():
         f"-DPython_EXECUTABLE={sys.executable}",
         f"-Dpybind11_DIR={pybind_dir}"
     ]
+    
+    print(f"Running config: {' '.join(bindings_cmake)}")
+    sys.stdout.flush()
     subprocess.run(bindings_cmake, cwd=bindings_dir, check=True)
-    subprocess.run(["cmake", "--build", "build"], cwd=bindings_dir, check=True)
+    
+    print("Compiling bindings (this may take a minute)...")
+    sys.stdout.flush()
+    subprocess.run(["cmake", "--build", "build", "-j"], cwd=bindings_dir, check=True)
 
     print("--- Copying libraries ---")
     lib_dest = root_dir / "src" / "lib"

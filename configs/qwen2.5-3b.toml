@@ -14,12 +14,12 @@ path = "Qwen/Qwen2.5-3B-Instruct-GGUF/qwen2.5-3b-instruct-q4_k_m.gguf"
 
 [caches.main]
 model = "qwen3b"
-n_ctx = 16384
+n_ctx = 131072                     # 128K Theoretical Limit for Qwen2.5
 description = "Main conversation"
 
 [caches.fast]
 model = "qwen3b"
-n_ctx = 4096
+n_ctx = 32768                       # 32K for fast background tasks
 description = "Background tasks"
 
 # ============================================================

@@ -323,29 +323,10 @@ class Bridge:
                     logger.warning(f"System prompt changed for cache '{cache_name}'. This will cause cache invalidation.")
                 self.cache_metadata[cache_name]["system_hash"] = current_hash
 
-    async def _generate(self, internal_req: dict, cache_name: str | None = None) -> dict:
-        """Execute non-streaming generation.
-        
-        Args:
-            internal_req: Internal request format
-            cache_name: Target cache/context name. If None, uses active context.
-        """
-        # Check system prompt consistency
-        self._check_system_prompt(internal_req, cache_name)
-
-        if self.mock and not self.wrapper:
-            return self._mock_generate(internal_req)
-
-        # Select the target context if specified
-        if cache_name and self.wrapper:
-            try:
-                self.wrapper.select_context(cache_name)
-            except RuntimeError as e:
-                logger.warning(f"Failed to select context '{cache_name}': {e}. Using active context.")
-
-        # 1. Apply template
+    def _prepare_tools(self, internal_tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Extract tool definitions for llama.cpp."""
         tools = []
-        for t in internal_req.get("tools", []):
+        for t in internal_tools:
             if t.get("type") == "function":
                 f = t["function"]
                 tools.append({
@@ -359,38 +340,64 @@ class Bridge:
                     "description": t.get("description", ""),
                     "parameters": json.dumps(t.get("parameters", {})) if isinstance(t.get("parameters"), dict) else t.get("parameters", "{}")
                 })
+        return tools
 
-        messages = self._normalize_messages(internal_req["messages"])
+    async def _generate(self, internal_req: dict, cache_name: str | None = None) -> dict:
+        """Execute non-streaming generation with truncation support."""
+        # Check system prompt consistency
+        self._check_system_prompt(internal_req, cache_name)
+
+        if self.mock and not self.wrapper:
+            return self._mock_generate(internal_req)
+
+        # Select the target context if specified
+        if cache_name and self.wrapper:
+            try:
+                self.wrapper.select_context(cache_name)
+            except RuntimeError as e:
+                logger.warning(f"Failed to select context '{cache_name}': {e}")
+
+        tools = self._prepare_tools(internal_req.get("tools", []))
+        msgs_to_use = internal_req["messages"]
+        max_tokens = internal_req.get("max_tokens", 4096)
         
+        # 1. Truncation Loop
+        raw_response = ""
+        max_retries = 10
         t0 = time.time()
-        template_res = self.wrapper.apply_template(
-            messages,
-            tools,
-            True
-        )
-        t1 = time.time()
-        logger.info(f"[Non-Streaming] Template applied in {t1 - t0:.3f}s. Prompt length: {len(template_res['prompt'])}")
         
-        # 2. Generate text
-        try:
-            raw_response = self.wrapper.generate(
-                template_res["prompt"],
-                internal_req.get("max_tokens", 4096)
-            )
-        except RuntimeError as e:
-            msg = str(e)
-            if "ContextLimitExceeded" in msg:
-                # msg format: "ContextLimitExceeded: Request (N tokens) exceeds context limit (M)"
-                match = re.search(r"Request \((\d+) tokens\) exceeds context limit \((\d+)\)", msg)
-                if match:
-                    requested = int(match.group(1))
-                    limit = int(match.group(2))
-                    raise ContextLimitExceededError(limit, requested, cache_name or "unknown")
-            raise e
+        for retry in range(max_retries):
+            messages = self._normalize_messages(msgs_to_use)
+            template_res = self.wrapper.apply_template(messages, tools, True)
+            prompt = template_res["prompt"]
+            
+            try:
+                raw_response = self.wrapper.generate(prompt, max_tokens)
+                break # Success
+            except RuntimeError as e:
+                msg = str(e)
+                if "ContextLimitExceeded" in msg:
+                    match = re.search(r"Request \((\d+) tokens\) exceeds context limit \((\d+)\)", msg)
+                    requested = int(match.group(1)) if match else 0
+                    limit = int(match.group(2)) if match else 0
+                    
+                    non_system_indices = [i for i, m in enumerate(msgs_to_use) if m.get("role") != "system"]
+                    if len(non_system_indices) > 2:
+                        idx_to_drop = non_system_indices[:2]
+                        logger.warning(f"Context limit hit ({requested}/{limit}). Truncating oldest message pair at indices {idx_to_drop} and retrying...")
+                        msgs_to_use = [m for i, m in enumerate(msgs_to_use) if i not in idx_to_drop]
+                        continue
+                    else:
+                        if match: raise ContextLimitExceededError(limit, requested, cache_name or "unknown")
+                raise e
+        else:
+            # Final fallback: one last attempt with what we have
+            raw_response = self.wrapper.generate(prompt, max_tokens)
+
         t2 = time.time()
-        logger.info(f"[Non-Streaming] Generation complete in {t2 - t1:.3f}s.")
+        logger.info(f"[Non-Streaming] Generation complete in {t2 - t0:.3f}s (retries={retry}).")
         
-        # 3. Parse result (for tool calls, reasoning, etc)
+        # 3. Parse result
         parsed = self.wrapper.parse_response(raw_response, False)
         usage = self.wrapper.get_usage()
         
@@ -398,23 +405,16 @@ class Bridge:
         reasoning = parsed.get("reasoning_content", "")
         tool_calls = parsed.get("tool_calls", [])
         
-        # FALLBACK: If C++ parser didn't find tool calls, try Python parsing
-        # for Qwen3-Coder style: <function=name><parameter=key>value</parameter></function>
         if not tool_calls and "<function=" in raw_response:
             tool_calls = _parse_qwen_tool_calls(raw_response)
-            if tool_calls:
-                logger.debug(f"Python fallback parsed {len(tool_calls)} tool call(s)")
         
-        # Fallback for reasoning tags
+        # Fallback for reasoning
         if not reasoning:
-            # Match <think>...</think> or <thought>...</thought>
             active_match = re.search(r"<(thought|think)>(.*?)</\1>(.*)", raw_response, re.DOTALL)
             if active_match:
                 reasoning = active_match.group(2).strip()
                 content = active_match.group(3).strip()
-                if self.debug: logger.debug(f"DEBUG: Found reasoning: {reasoning[:20]}...")
             else:
-                # Still check if it just started but didn't close
                 open_match = re.search(r"<(thought|think)>(.*)", raw_response, re.DOTALL)
                 if open_match:
                     reasoning = open_match.group(2).strip()
@@ -422,22 +422,16 @@ class Bridge:
                 else:
                     content = raw_response.strip()
 
-        # If tool_calls were found by fallback, remove raw XML from content
         if tool_calls and "<function=" in content:
-            # Remove <tool_call>...</tool_call> blocks
             content = re.sub(r'<tool_call>.*?</tool_call>', '', content, flags=re.DOTALL)
-            # Also remove standalone <function=...>...</function>  
             content = re.sub(r'<function=\w+>.*?</function>', '', content, flags=re.DOTALL)
             content = content.strip()
-
-        # Final cleanup: ensure tool_calls means stop_reason is tool_use
-        final_stop_reason = "tool_use" if tool_calls else "end_turn"
 
         return {
             "content": content,
             "reasoning_content": reasoning,
             "tool_calls": tool_calls,
-            "stop_reason": final_stop_reason,
+            "stop_reason": "tool_use" if tool_calls else "end_turn",
             "usage": {
                 "input_tokens": usage["prompt_tokens"],
                 "output_tokens": usage["completion_tokens"]
@@ -477,53 +471,47 @@ class Bridge:
             except RuntimeError as e:
                 logger.warning(f"Failed to select context '{cache_name}': {e}. Using active context.")
 
-        # 1. Apply template
-        tools = []
-        for t in internal_req.get("tools", []):
-            if t.get("type") == "function":
-                f = t["function"]
-                tools.append({
-                    "name": f["name"],
-                    "description": f.get("description", ""),
-                    "parameters": json.dumps(f["parameters"]) if isinstance(f.get("parameters"), dict) else f.get("parameters", "{}")
-                })
-            else:
-                tools.append({
-                    "name": t.get("name", ""),
-                    "description": t.get("description", ""),
-                    "parameters": json.dumps(t.get("parameters", {})) if isinstance(t.get("parameters"), dict) else t.get("parameters", "{}")
-                })
-
-        messages = self._normalize_messages(internal_req["messages"])
+        # 1. Prepare and apply template
+        tools = self._prepare_tools(internal_req.get("tools", []))
+        msgs_to_use = internal_req["messages"]
+        max_tokens = internal_req.get("max_tokens", 0) or 0
         
-        logger.info("Step 1: Applying chat template...")
         t0 = time.time()
-        template_res = self.wrapper.apply_template(
-            messages,
-            tools,
-            True
-        )
-        t1 = time.time()
-        logger.info(f"Template applied in {t1 - t0:.3f}s. Prompt length: {len(template_res['prompt'])}")
         
-        # 2. Init inference
+        # 2. Init inference with retry/truncation
         logger.info("Step 2: Initializing inference (Prefill)...")
-        try:
-            self.wrapper.init_inference(
-                template_res["prompt"],
-                internal_req.get("max_tokens", 0) or 0
-            )
-        except RuntimeError as e:
-            msg = str(e)
-            if "ContextLimitExceeded" in msg:
-                match = re.search(r"Request \((\d+) tokens\) exceeds context limit \((\d+)\)", msg)
-                if match:
-                    requested = int(match.group(1))
-                    limit = int(match.group(2))
-                    raise ContextLimitExceededError(limit, requested, cache_name or "unknown")
-            raise e
+        
+        max_retries = 10
+        for retry in range(max_retries):
+            messages = self._normalize_messages(msgs_to_use)
+            template_res = self.wrapper.apply_template(messages, tools, True)
+            prompt = template_res["prompt"]
+            
+            try:
+                self.wrapper.init_inference(prompt, max_tokens)
+                break # Success
+            except RuntimeError as e:
+                msg = str(e)
+                if "ContextLimitExceeded" in msg:
+                    match = re.search(r"Request \((\d+) tokens\) exceeds context limit \((\d+)\)", msg)
+                    requested = int(match.group(1)) if match else 0
+                    limit = int(match.group(2)) if match else 0
+                    
+                    non_system_indices = [i for i, m in enumerate(msgs_to_use) if m.get("role") != "system"]
+                    
+                    if len(non_system_indices) > 2:
+                        idx_to_drop = non_system_indices[:2]
+                        logger.warning(f"Context limit hit ({requested}/{limit}). Truncating oldest message pair at indices {idx_to_drop} and retrying...")
+                        msgs_to_use = [m for i, m in enumerate(msgs_to_use) if i not in idx_to_drop]
+                        continue 
+                    else:
+                        if match: raise ContextLimitExceededError(limit, requested, cache_name or "unknown")
+                raise e
+        else:
+            self.wrapper.init_inference(prompt, max_tokens)
+
         t2 = time.time()
-        logger.info(f"Inference initialized (Prefill complete) in {t2 - t1:.3f}s. Starting token generation...")
+        logger.info(f"Inference initialized (Prefill complete) in {t2 - t0:.3f}s (retries={retry}). Starting token generation...")
         
         # 3. Stream loop
         full_raw = ""

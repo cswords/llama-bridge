@@ -54,27 +54,38 @@ def run_benchmark():
             
         print(f"Server ready in {startup_duration:.2f}s")
         
-        # Test request
-        payload = {
-            "model": "llama-bridge",
-            "messages": [{"role": "user", "content": "Hi, who are you?"}],
-            "max_tokens": 50,
-            "stream": False
-        }
+        # Test using Claude Code CLI (more realistic)
+        prompt = "Hi, who are you?"
         
         # Cold Request
-        print("Sending cold request...")
+        print("Sending cold request via Claude Code...")
         t_cold_start = time.time()
-        res_cold = requests.post(f"{url}/v1/messages", json=payload)
+        result_cold = subprocess.run(
+            ["uv", "run", "cc", "-p", prompt],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
         t_cold_end = time.time()
         cold_latency = t_cold_end - t_cold_start
         
+        if result_cold.returncode != 0:
+            print(f"WARNING: Cold request failed: {result_cold.stderr}")
+        
         # Hot Request
-        print("Sending hot request...")
+        print("Sending hot request via Claude Code...")
         t_hot_start = time.time()
-        res_hot = requests.post(f"{url}/v1/messages", json=payload)
+        result_hot = subprocess.run(
+            ["uv", "run", "cc", "-p", prompt],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
         t_hot_end = time.time()
         hot_latency = t_hot_end - t_hot_start
+        
+        if result_hot.returncode != 0:
+            print(f"WARNING: Hot request failed: {result_hot.stderr}")
         
         results.append({
             "config": config_path,

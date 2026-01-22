@@ -112,10 +112,33 @@ async def anthropic_messages(request: Request) -> Response:
     stream = body.get("stream", False)
     
     if stream:
-        return StreamingResponse(
-            bridge.stream_anthropic(body, cache_name=cache_name),
-            media_type="text/event-stream",
-        )
+        generator = bridge.stream_anthropic(body, cache_name=cache_name)
+        try:
+            # Multi-step iterator to catch exceptions before StreamingResponse starts
+            # We peek at the first chunk to trigger init_inference (where overflow is checked)
+            try:
+                first_chunk = await generator.__anext__()
+            except StopAsyncIteration:
+                return StreamingResponse(iter([]), media_type="text/event-stream")
+
+            async def wrapped_generator():
+                yield first_chunk
+                async for chunk in generator:
+                    yield chunk
+
+            return StreamingResponse(
+                wrapped_generator(),
+                media_type="text/event-stream",
+            )
+        except ContextLimitExceededError as e:
+            # Re-raise to let the global exception handler return a proper 400 JSONResponse
+            raise e
+        except Exception as e:
+            logger.exception(f"Error initializing stream: {e}")
+            return JSONResponse(
+                status_code=500,
+                content={"error": {"message": str(e), "type": "server_error"}}
+            )
     else:
         result = await bridge.complete_anthropic(body, cache_name=cache_name)
         return Response(
@@ -146,10 +169,31 @@ async def openai_chat_completions(request: Request) -> Response:
     stream = body.get("stream", False)
     
     if stream:
-        return StreamingResponse(
-            bridge.stream_openai(body, cache_name=cache_name),
-            media_type="text/event-stream",
-        )
+        generator = bridge.stream_openai(body, cache_name=cache_name)
+        try:
+            # Peek at the first chunk to trigger init_inference
+            try:
+                first_chunk = await generator.__anext__()
+            except StopAsyncIteration:
+                return StreamingResponse(iter([]), media_type="text/event-stream")
+
+            async def wrapped_generator():
+                yield first_chunk
+                async for chunk in generator:
+                    yield chunk
+
+            return StreamingResponse(
+                wrapped_generator(),
+                media_type="text/event-stream",
+            )
+        except ContextLimitExceededError as e:
+            raise e
+        except Exception as e:
+            logger.exception(f"Error initializing stream: {e}")
+            return JSONResponse(
+                status_code=500,
+                content={"error": {"message": str(e), "type": "server_error"}}
+            )
     else:
         result = await bridge.complete_openai(body, cache_name=cache_name)
         return Response(

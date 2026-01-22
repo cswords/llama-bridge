@@ -18,7 +18,6 @@ dev = [
     "pytest-asyncio>=0.23.0",
     "pytest-httpx>=0.28.0",
     "black>=24.0.0",
-    "nodeenv>=1.8.0",
     "pexpect>=4.9.0",
     "requests>=2.31.0",
 ]
@@ -28,7 +27,7 @@ serve = "src.server:main"
 cc = "src.cli:run_claude_code"
 hfd = "src.cli:download_model"
 build = "src.cli:build"
-
+benchmark = "src.utils.benchmark:run_benchmark"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

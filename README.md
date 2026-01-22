@@ -213,20 +213,19 @@ uv run build
 
 我们在 Mac Studio (M3 Ultra) 上对以下模型配置进行了端到端验证（2026-01-21）：
 
-| 模型名称 | 规模 | 量化 | 启动耗时 | Cold | Hot |
+| 模型配置 | 规模 | 量化 | 启动耗时 | Cold (E2E) | Hot (E2E) |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Qwen 2.5 3B Instruct** | 3B | Q4_K_M | ~3s | 0.12s | 0.08s |
-| **Qwen3-Coder-30B-A3B** | 30B | Q5_K_M | ~12s | 0.19s | 0.14s |
-| **MiMo-V2-Flash** | ~70B | UD-Q6_XL | ~17s | 0.67s | 0.29s |
-| **GLM-4.7-REAP-218B** | 218B | Q2_K | ~30s | 0.80s | 0.54s |
+| **Qwen 2.5 3B** | 3B | Q4_K_M | ~3.0s | ~10.2s | ~1.0s |
+| **Qwen3-Coder-30B** | 30B | Q5_K_M | ~5.0s | ~25.5s | ~6.1s |
+| **MiMo-V2-Flash** | ~70B | UD-Q6_XL | ~17.0s | ~78.9s | ~9.0s |
+| **GLM-4.7-REAP** | 218B | Q2_K | ~32.1s | ~156.0s | ~20.6s |
 
 > **测试说明**: 
-> - 以上数据基于 Mac Studio (M3 Ultra) 及 SSD 环境。
-> - **OS Cache**: 启动耗时包含 Page Cache 命中情况。冷启动（刚开机）首个超大模型可能需要 1-2 分钟。
-> - **首请求延迟**: 包含 Metal Shader 编译与预热。MiMo 等动态架构模型在首个请求上有显著的编译开销。
-> - **内存管理**: `mimo-v2.toml` 默认开启 256K Context，如遇内存压力请在配置中调低 `n_ctx`。
+> - 以上数据基于 Mac Studio (M3 Ultra) 环境。
+> - **End-to-End (E2E)**: 时间包含了从执行 `uv run cc -p "..."` 到输出结果的全流程，涵盖了 CLI 启动、网络通信、模型推理及输出。
+> - **Cold**: 代表服务器刚启动后的首次请求（包含模型权重动态加载/预热开销）。
+> - **Hot**: 代表缓存就绪后的后续请求。
 
 ---
 
 详细设计方案与 TDD 进化路线图请参考 [INSTRUCTION.md](./INSTRUCTION.md)。
-
