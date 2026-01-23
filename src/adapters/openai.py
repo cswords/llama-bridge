@@ -48,6 +48,7 @@ class OpenAIAdapter(BaseAdapter):
                 "message": Message(
                     role="assistant",
                     content=response.get("content"),
+                    reasoning_content=response.get("reasoning_content"),
                     tool_calls=tool_calls
                 ),
                 "finish_reason": "tool_calls" if tool_calls else "stop"
@@ -57,4 +58,23 @@ class OpenAIAdapter(BaseAdapter):
 
     def chunk_to_sse(self, chunk: Dict[str, Any], state: Dict[str, Any]) -> str:
         """Convert internal chunk to OpenAI SSE."""
-        return f"data: {json.dumps(chunk)}\n\n"
+        delta = {}
+        if "thought" in chunk:
+            delta["reasoning_content"] = chunk["thought"]
+        if "content" in chunk:
+            delta["content"] = chunk["content"]
+        if "tool_calls" in chunk:
+            delta["tool_calls"] = chunk["tool_calls"]
+
+        openai_chunk = {
+            "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": "llama-bridge",
+            "choices": [{
+                "index": 0,
+                "delta": delta,
+                "finish_reason": chunk.get("stop_reason")
+            }]
+        }
+        return f"data: {json.dumps(openai_chunk)}\n\n"

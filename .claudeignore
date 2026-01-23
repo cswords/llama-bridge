@@ -1,0 +1,10 @@
+vendor/
+models/
+build/
+bindings/build/
+*.so
+*.dylib
+.venv/
+node_modules/
+logs/
+tests/

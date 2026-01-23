@@ -15,6 +15,9 @@ import sys
 import time
 import uuid
 import hashlib
+import asyncio
+import contextlib
+import codecs
 from datetime import datetime
 from pathlib import Path
 from typing import AsyncGenerator, Dict, List, Optional, Any
@@ -76,6 +79,49 @@ def _parse_qwen_tool_calls(raw_text: str) -> List[Dict[str, Any]]:
     return tool_calls
 
 
+def _parse_minimax_tool_calls(raw_text: str) -> List[Dict[str, Any]]:
+    """
+    Parse MiniMax-M2 style tool calls from raw model output.
+    
+    Format: <minimax:tool_call><invoke name="get_weather"><parameter name="location">Shanghai</parameter></invoke></minimax:tool_call>
+    """
+    tool_calls = []
+    
+    # Pattern for <invoke name="...">(.*?)</invoke>
+    invoke_pattern = r'<invoke name="([^"]+)">(.*?)</invoke>'
+    param_pattern = r'<parameter name="([^"]+)">(.*?)</parameter>'
+    
+    # Check for <minimax:tool_call> blocks
+    tc_blocks = re.findall(r'<minimax:tool_call>(.*?)</minimax:tool_call>', raw_text, re.DOTALL)
+    if not tc_blocks and '<invoke name="' in raw_text:
+        # Fallback if the outer tag is missing but invokes are present
+        tc_blocks = [raw_text]
+        
+    for block in tc_blocks:
+        for match in re.finditer(invoke_pattern, block, re.DOTALL):
+            func_name = match.group(1)
+            func_body = match.group(2)
+            
+            # Extract parameters
+            params = {}
+            for param_match in re.finditer(param_pattern, func_body, re.DOTALL):
+                param_name = param_match.group(1)
+                param_value = param_match.group(2).strip()
+                # Try to parse as JSON for complex types
+                try:
+                    params[param_name] = json.loads(param_value)
+                except (json.JSONDecodeError, ValueError):
+                    params[param_name] = param_value
+            
+            tool_calls.append({
+                "id": f"call_{uuid.uuid4().hex[:24]}",
+                "name": func_name,
+                "arguments": json.dumps(params)
+            })
+    
+    return tool_calls
+
+
 class Bridge:
     """
     Core bridge between API formats and llama.cpp inference.
@@ -118,6 +164,7 @@ class Bridge:
         
         self.wrapper = None
         self.cache_metadata = {}
+        self._locks = {} # Per-cache locks for thread safety
         
         self.check_ready()
         
@@ -128,12 +175,18 @@ class Bridge:
             )
             
             # Create additional contexts if configured
+            contexts = ['default']
             for cache_cfg in self.cache_configs:
                 cache_name = cache_cfg.get('name', 'unnamed')
                 cache_n_ctx = cache_cfg.get('n_ctx', 0)
-                if cache_name != 'default':  # 'default' is created automatically
+                if cache_name != 'default':
                     self.wrapper.create_context(cache_name, cache_n_ctx)
+                    contexts.append(cache_name)
                     logger.info(f"Created context '{cache_name}' with n_ctx={cache_n_ctx}")
+            
+            # Initialize locks for all known contexts
+            for ctx in contexts:
+                self._locks[ctx] = asyncio.Lock()
             
             logger.info(f"Model loaded from {model_path}")
             logger.info(f"Available contexts: {self.wrapper.list_contexts()}")
@@ -275,15 +328,40 @@ class Bridge:
 
 
     def _normalize_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Normalize messages for llama.cpp, primarily flattening tool_calls."""
+        """Normalize messages for llama.cpp, handling multi-block content and flattening tool_calls."""
         normalized = []
         for msg in messages:
             n_msg = msg.copy()
-            if "tool_calls" in n_msg:
+            role = n_msg.get("role")
+            content = n_msg.get("content")
+
+            # Handle list-style content (Anthropic/OpenAI Multi-modal/Mixed)
+            if isinstance(content, list):
+                text_parts = []
+                for block in content:
+                    if isinstance(block, dict):
+                        b_type = block.get("type")
+                        if b_type == "text":
+                            text_parts.append(block.get("text", ""))
+                        elif b_type == "image":
+                            # Vision not yet supported, notify in logs
+                            logger.warning("Vision/Image blocks are not yet supported and will be ignored.")
+                        elif b_type == "tool_use":
+                            # Already handled in adapter but safe to flatten here if needed
+                            if "tool_calls" not in n_msg: n_msg["tool_calls"] = []
+                            n_msg["tool_calls"].append({
+                                "id": block.get("id"),
+                                "name": block.get("name"),
+                                "arguments": json.dumps(block.get("input", {}))
+                            })
+                n_msg["content"] = "\n".join(text_parts)
+
+            # Flatten and normalize tool_calls
+            if "tool_calls" in n_msg and n_msg["tool_calls"]:
                 n_tcs = []
                 for tc in n_msg["tool_calls"]:
                     ntc = tc.copy()
-                    # If it's the OpenAI nested format, flatten it
+                    # Flatten OpenAI nested structure
                     if "function" in ntc and isinstance(ntc["function"], dict):
                         f = ntc["function"]
                         if "name" in f: ntc["name"] = f["name"]
@@ -295,6 +373,7 @@ class Bridge:
                     
                     n_tcs.append(ntc)
                 n_msg["tool_calls"] = n_tcs
+            
             normalized.append(n_msg)
         return normalized
 
@@ -409,8 +488,11 @@ class Bridge:
         reasoning = parsed.get("reasoning_content", "")
         tool_calls = parsed.get("tool_calls", [])
         
-        if not tool_calls and "<function=" in raw_response:
-            tool_calls = _parse_qwen_tool_calls(raw_response)
+        if not tool_calls:
+            if "<function=" in raw_response:
+                tool_calls = _parse_qwen_tool_calls(raw_response)
+            elif "<minimax:tool_call>" in raw_response or "<invoke name=" in raw_response:
+                tool_calls = _parse_minimax_tool_calls(raw_response)
         
         # Fallback for reasoning
         if not reasoning:
@@ -426,9 +508,12 @@ class Bridge:
                 else:
                     content = raw_response.strip()
 
-        if tool_calls and "<function=" in content:
+        # Clean up tags from content if tool calls are present
+        if tool_calls:
             content = re.sub(r'<tool_call>.*?</tool_call>', '', content, flags=re.DOTALL)
             content = re.sub(r'<function=\w+>.*?</function>', '', content, flags=re.DOTALL)
+            content = re.sub(r'<minimax:tool_call>.*?</minimax:tool_call>', '', content, flags=re.DOTALL)
+            content = re.sub(r'<invoke name="[^"]+">.*?</invoke>', '', content, flags=re.DOTALL)
             content = content.strip()
 
         return {
@@ -441,6 +526,21 @@ class Bridge:
                 "output_tokens": usage["completion_tokens"]
             }
         }
+
+    @contextlib.contextmanager
+    def _suppress_stderr(self):
+        """Suppress stderr if not in debug mode."""
+        if not self.debug:
+            with open(os.devnull, 'w') as devnull:
+                old_stderr = os.dup(sys.stderr.fileno())
+                os.dup2(devnull.fileno(), sys.stderr.fileno())
+                try:
+                    yield
+                finally:
+                    os.dup2(old_stderr, sys.stderr.fileno())
+                    os.close(old_stderr)
+        else:
+            yield
 
     async def _stream_generate(self, internal_req: dict, cache_name: str | None = None) -> AsyncGenerator[dict, None]:
         """Call llama.cpp for streaming generation.
@@ -468,172 +568,260 @@ class Bridge:
             yield {"content": "", "stop_reason": "end_turn", "usage": {"input_tokens": 10, "output_tokens": 10}}
             return
 
-        # Select the target context if specified
-        if cache_name and self.wrapper:
-            try:
-                self.wrapper.select_context(cache_name)
-            except RuntimeError as e:
-                logger.warning(f"Failed to select context '{cache_name}': {e}. Using active context.")
+        # Select the target context and get its lock
+        lock = self._locks.get(cache_name or 'default')
+        if not lock:
+            lock = self._locks.setdefault(cache_name or 'default', asyncio.Lock())
 
-        # 1. Prepare and apply template
-        tools = self._prepare_tools(internal_req.get("tools", []))
-        msgs_to_use = internal_req["messages"]
-        max_tokens = internal_req.get("max_tokens", 0) or 0
-        
-        t0 = time.time()
-        
-        # 2. Init inference with retry/truncation
-        logger.info("Step 2: Initializing inference (Prefill)...")
-        
-        max_retries = 10
-        for retry in range(max_retries):
-            messages = self._normalize_messages(msgs_to_use)
-            template_res = self.wrapper.apply_template(messages, tools, True)
-            prompt = template_res["prompt"]
-            
-            try:
-                self.wrapper.init_inference(prompt, max_tokens)
-                break # Success
-            except RuntimeError as e:
-                msg = str(e)
-                if "ContextLimitExceeded" in msg:
-                    match = re.search(r"Request \((\d+) tokens\) exceeds context limit \((\d+)\)", msg)
-                    requested = int(match.group(1)) if match else 0
-                    limit = int(match.group(2)) if match else 0
-                    
-                    non_system_indices = [i for i, m in enumerate(msgs_to_use) if m.get("role") != "system"]
-                    
-                    if len(non_system_indices) > 2:
-                        idx_to_drop = non_system_indices[:2]
-                        logger.warning(f"Context limit hit ({requested}/{limit}). Truncating oldest message pair at indices {idx_to_drop} and retrying...")
-                        msgs_to_use = [m for i, m in enumerate(msgs_to_use) if i not in idx_to_drop]
-                        continue 
-                    else:
-                        if match: raise ContextLimitExceededError(limit, requested, cache_name or "unknown")
-                raise e
-        else:
-            self.wrapper.init_inference(prompt, max_tokens)
+        async with lock:
+            if cache_name and self.wrapper:
+                try:
+                    self.wrapper.select_context(cache_name)
+                except RuntimeError as e:
+                    logger.warning(f"Failed to select context '{cache_name}': {e}. Using active context.")
 
-        t2 = time.time()
-        logger.info(f"Inference initialized (Prefill complete) in {t2 - t0:.3f}s (retries={retry}). Starting token generation...")
-        
-        # 3. Stream loop
-        full_raw = ""
-        last_content_pos = 0
-        last_reasoning_pos = 0
-        
-        while True:
-            token = self.wrapper.get_next_token()
-            if not token: # EOS or Error
-                # Final parse (not partial)
-                parsed = self.wrapper.parse_response(full_raw, False)
-                usage = self.wrapper.get_usage()
-                
-                # Check for any final tool calls from C++ parser
-                tool_calls = parsed.get("tool_calls", [])
-                
-                # FALLBACK: If C++ parser didn't find tool calls, try Python parsing
-                # for Qwen3-Coder style: <function=name><parameter=key>value</parameter></function>
-                if not tool_calls and "<function=" in full_raw:
-                    tool_calls = _parse_qwen_tool_calls(full_raw)
-                    if tool_calls:
-                        logger.debug(f"Python fallback parsed {len(tool_calls)} tool call(s)")
-                
-                yield {
-                    "content": "", 
-                    "tool_calls": tool_calls,
-                    "stop_reason": "tool_use" if tool_calls else "end_turn",
-                    "usage": {
-                        "input_tokens": usage["prompt_tokens"],
-                        "output_tokens": usage["completion_tokens"]
-                    }
-                }
-                break
-                
-            full_raw += token
+            # 1. Prepare and apply template
+            tools = self._prepare_tools(internal_req.get("tools", []))
+            msgs_to_use = internal_req["messages"]
+            max_tokens = internal_req.get("max_tokens", 0) or 0
             
-            # Incremental parse (partial=True)
-            # This handles structured content like <think>...</think> or tool calls
-            parsed = self.wrapper.parse_response(full_raw, True)
+            t0 = time.time()
             
-            # 1. Improved State-aware parsing and suppression
-            # We look for structured blocks like <thought>, <think>, <tool_call>, or <function
-            curr_content = full_raw
-            curr_reasoning = parsed.get("reasoning_content", "")
+            # 2. Init inference with retry/truncation
+            # CRITICAL: Use to_thread to avoid blocking the event loop during heavy prefill!
+            if not self.debug:
+                logger.info(f"[{cache_name or 'default'}] Prefilling...")
+            else:
+                logger.info(f"Step 2: [{cache_name or 'default'}] Initializing inference (Prefill)...")
             
-            # Suppression logic: find the first block start
-            block_match = re.search(r"<(thought|think|tool_call|function=)", full_raw, re.IGNORECASE)
-            if block_match:
-                tag_start_pos = block_match.start()
-                # Text before the first block is definitely content
-                curr_content = full_raw[:tag_start_pos].strip()
+            max_retries = 10
+            template_res = {}
+            for retry in range(max_retries):
+                messages = self._normalize_messages(msgs_to_use)
+                # Suppress template fallback warnings from C++ if not debug
+                with self._suppress_stderr():
+                    template_res = self.wrapper.apply_template(messages, tools, True)
+                prompt = template_res["prompt"]
                 
-                # Check for reasoning specifically
-                if "thought" in block_match.group(1).lower() or "think" in block_match.group(1).lower():
-                    # We found a reasoning start. 
-                    # If llama.cpp didn't extract it, we extract the part between tags
-                    if not curr_reasoning:
-                        active_tag = block_match.group(1)
-                        r_match = re.search(rf"<{active_tag}>(.*?)(?:</{active_tag}>|$)", full_raw, re.DOTALL | re.IGNORECASE)
-                        if r_match:
-                            curr_reasoning = r_match.group(1)
-                            # If it's closed, there might be MORE content after it
-                            post_match = re.search(rf"</{active_tag}>(.*)", full_raw, re.DOTALL | re.IGNORECASE)
-                            if post_match:
-                                # We need to re-evaluate for more blocks in the tail
-                                tail = post_match.group(1)
-                                second_block = re.search(r"<(thought|think|tool_call|function=)", tail, re.IGNORECASE)
-                                if second_block:
-                                    curr_content += "\n" + tail[:second_block.start()].strip()
-                                else:
-                                    curr_content += "\n" + tail.strip()
-                                
-                                # Strip leading newline if it was empty before
-                                curr_content = curr_content.strip()
-                    else:
-                        # If reasoning was already extracted by C++, trust the content provided by C++
-                        curr_content = parsed.get("content", "")
-                else:
-                    # It's a tool call start. If it's closed, check for text after it.
-                    # Qwen uses <tool_call>...</tool_call> or just <function=...>...</function>
-                    tc_tag = block_match.group(1)
-                    if tc_tag == "tool_call":
-                        end_tag = "</tool_call>"
-                    else:
-                        end_tag = "</function>"
+                try:
+                    await asyncio.to_thread(self.wrapper.init_inference, prompt, max_tokens)
+                    break # Success
+                except RuntimeError as e:
+                    msg = str(e)
+                    if "ContextLimitExceeded" in msg:
+                        match = re.search(r"Request \((\d+) tokens\) exceeds context limit \((\d+)\)", msg)
+                        requested = int(match.group(1)) if match else 0
+                        limit = int(match.group(2)) if match else 0
                         
-                    tc_end_match = re.search(rf"{end_tag}(.*)", full_raw, re.DOTALL | re.IGNORECASE)
-                    if tc_end_match:
-                         tail = tc_end_match.group(1)
-                         # Recursive-like: check for more blocks in tail
-                         next_block = re.search(r"<(thought|think|tool_call|function=)", tail, re.IGNORECASE)
-                         if next_block:
-                             curr_content += "\n" + tail[:next_block.start()].strip()
-                         else:
-                             curr_content += "\n" + tail.strip()
+                        non_system_indices = [i for i, m in enumerate(msgs_to_use) if m.get("role") != "system"]
+                        
+                        if len(non_system_indices) > 2:
+                            idx_to_drop = non_system_indices[:2]
+                            logger.warning(f"Context limit hit ({requested}/{limit}). Truncating oldest message pair and retrying...")
+                            msgs_to_use = [m for i, m in enumerate(msgs_to_use) if i not in idx_to_drop]
+                            continue 
+                        else:
+                            if match: raise ContextLimitExceededError(limit, requested, cache_name or "unknown")
+                    raise e
+            else:
+                template_res = self.wrapper.apply_template(messages, tools, True)
+                await asyncio.to_thread(self.wrapper.init_inference, template_res["prompt"], max_tokens)
+
+            # Get additional stops from template and request
+            all_stops = list(template_res.get("additional_stops", []))
+            req_stops = internal_req.get("stop") or []
+            if isinstance(req_stops, str): req_stops = [req_stops]
+            for s in req_stops:
+                if s and s not in all_stops: all_stops.append(s)
+
+            t2 = time.time()
+            logger.info(f"[{cache_name or 'default'}] Prefill complete in {t2 - t0:.1f}s. Generating...")
             
-            # Clean up whitespace
-            # CRITICAL FIX: Do NOT strip() here! It eats spaces and prevents progress.
-            # curr_content = curr_content.strip()
-            # curr_reasoning = curr_reasoning.strip()
+            # 3. Stream loop
+            full_raw = ""
+            last_pos = 0     # Strictly monotonic index into full_raw
+            current_mode = "text" # "text", "thought", or "suppress"
+            actual_stop_seq = None
+            last_yield_time = time.time()
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
             
-            # 2. Handle Thoughts (Reasoning)
-            if self.debug:
-                logger.debug(f"[Stream] Raw len: {len(full_raw)}, Content: '{curr_content}' ({len(curr_content)}), Reasoning: '{curr_reasoning}' ({len(curr_reasoning)})")
-            if len(curr_reasoning) > last_reasoning_pos:
-                delta = curr_reasoning[last_reasoning_pos:]
-                yield {"thought": delta, "stop_reason": None}
-                last_reasoning_pos = len(curr_reasoning)
-            
-            # 3. Handle Text Content
-            if len(curr_content) > last_content_pos:
-                delta = curr_content[last_content_pos:]
-                yield {"content": delta, "stop_reason": None}
-                last_content_pos = len(curr_content)
-            
-            # Note: For tool calls in streaming, we usually wait until they are complete 
-            # unless we implement a complex JSON-patch streaming logic.
-            # Here we follow the LiteLLM/Anthropic pattern of text first, then tools at EOS.
+            async def process_and_yield_buffer(force: bool = False):
+                """Monotonic scanner to process full_raw and yield deltas."""
+                nonlocal full_raw, last_pos, current_mode, last_yield_time
+                
+                if not force and (time.time() - last_yield_time) < 0.05:
+                    return
+
+                # Scan from last_pos to end of full_raw
+                # We identify boundaries for <thought>, <think>, and tool tags.
+                while last_pos < len(full_raw):
+                    remaining = full_raw[last_pos:]
+                    
+                    # 1. Handle Thought Mode
+                    if current_mode == "thought":
+                        # Look for end of thought
+                        end_match = re.search(r'</(?:thought|think)>', remaining)
+                        if end_match:
+                            # Yield delta up to tag start
+                            delta = remaining[:end_match.start()]
+                            if delta: yield {"thought": delta}
+                            last_pos += end_match.end()
+                            current_mode = "text"
+                            continue
+                        else:
+                            # Still in thought. But wait if we might have a partial closing tag
+                            if not force:
+                                last_lt = remaining.rfind('<')
+                                if last_lt != -1 and re.match(r'</?(?:th|think|thought).*?$', remaining[last_lt:]):
+                                    # Pause before potential tag
+                                    delta = remaining[:last_lt]
+                                    if delta: yield {"thought": delta}
+                                    last_pos += last_lt
+                                    break # Wait for more data
+                            
+                            # Entire remaining is thought
+                            yield {"thought": remaining}
+                            last_pos += len(remaining)
+                            break
+                    
+                    # 1.1 Handle Suppress Mode (for tool calls)
+                    elif current_mode == "suppress":
+                        # Look for end of suppression
+                        end_match = re.search(r'</(?:tool_call|minimax:tool_call)>', remaining)
+                        if end_match:
+                            last_pos += end_match.end()
+                            current_mode = "text"
+                            continue
+                        else:
+                            # Still suppressing, wait for more
+                            last_pos += len(remaining)
+                            break
+                    
+                    # 2. Handle Text mode
+                    else:
+                        # Look for start of thought, tool call, OR any closing tag we want to suppress
+                        # Tool tags: <tool_call>, <minimax:tool_call>, <function=, <invoke
+                        # Closing tags: </thought>, </think>, </minimax:tool_call>, </invoke>, </tool_call>, </function>
+                        combined_pat = r'<(?:thought|think|tool_call|minimax:tool_call|function=|invoke)|</(?:thought|think|tool_call|minimax:tool_call|function|invoke)>'
+                        match = re.search(combined_pat, remaining)
+                        
+                        if match:
+                            # Yield text before tag
+                            delta = remaining[:match.start()]
+                            if delta: yield {"content": delta}
+                            
+                            tag = match.group(0)
+                            
+                            if tag.startswith('</'):
+                                # It's a closing tag in text mode - just ignore/suppress it
+                                last_pos += match.end()
+                                continue
+                            else:
+                                # It's an opening tag
+                                tag_type = tag.strip('<')
+                                if tag_type in ["thought", "think"]:
+                                    current_mode = "thought"
+                                    last_pos += match.end()
+                                elif tag_type in ["tool_call", "minimax:tool_call"]:
+                                    current_mode = "suppress"
+                                    last_pos += match.end()
+                                else:
+                                    # It's a tag like <invoke or <function= that needs skipping to the end of the tag
+                                    tag_end = full_raw.find('>', last_pos + match.start())
+                                    if tag_end != -1:
+                                        last_pos = tag_end + 1
+                                    else:
+                                        # Tag is not closed yet, wait for more data
+                                        last_pos += match.start() # Position back to before the tag
+                                        break
+                                continue
+                        else:
+                            # No tags found in remaining
+                            # Check for partial tag at the end
+                            if not force:
+                                last_lt = remaining.rfind('<')
+                                if last_lt != -1 and re.match(r'</?[a-zA-Z0-9_=:]*$', remaining[last_lt:]):
+                                    delta = remaining[:last_lt]
+                                    if delta: yield {"content": delta}
+                                    last_pos += last_lt
+                                    break
+                            
+                            yield {"content": remaining}
+                            last_pos += len(remaining)
+                            break
+
+                last_yield_time = time.time()
+
+            while True:
+                # Offload to thread to keep server responsive
+                # new_bytes is raw bytes from C++ to handle UTF-8 splits
+                new_bytes = await asyncio.to_thread(self.wrapper.get_next_token)
+                
+                if not new_bytes: # EOS
+                    full_raw += decoder.decode(b"", final=True)
+                    async for chunk in process_and_yield_buffer(force=True):
+                        yield chunk
+                    
+                    # Final parse (not partial)
+                    parsed = self.wrapper.parse_response(full_raw, False)
+                    usage = self.wrapper.get_usage()
+                    tool_calls = parsed.get("tool_calls", [])
+                    
+                    if not tool_calls:
+                        if "<function=" in full_raw:
+                            tool_calls = _parse_qwen_tool_calls(full_raw)
+                        elif "<minimax:tool_call>" in full_raw or "<invoke name=" in full_raw:
+                            tool_calls = _parse_minimax_tool_calls(full_raw)
+                    
+                    stop_reason = "end_turn"
+                    if tool_calls:
+                        stop_reason = "tool_use"
+                    elif actual_stop_seq:
+                        stop_reason = "stop_sequence"
+
+                    yield {
+                        "content": "", 
+                        "tool_calls": tool_calls,
+                        "stop_reason": stop_reason,
+                        "usage": {
+                            "input_tokens": usage["prompt_tokens"],
+                            "output_tokens": usage["completion_tokens"]
+                        }
+                    }
+                    break
+                
+                full_raw += decoder.decode(new_bytes, final=False)
+                
+                # Check for stop sequences in raw stream
+                for s in all_stops:
+                    if full_raw.endswith(s):
+                        actual_stop_seq = s
+                        # Trim stop sequence from full_raw
+                        full_raw = full_raw[:-len(s)]
+                        # Signal EOS to decoder
+                        full_raw += decoder.decode(b"", final=True)
+                        async for chunk in process_and_yield_buffer(force=True):
+                            yield chunk
+                        
+                        # Finalize
+                        parsed = self.wrapper.parse_response(full_raw, False)
+                        usage = self.wrapper.get_usage()
+                        tool_calls = parsed.get("tool_calls", [])
+                        
+                        yield {
+                            "content": "",
+                            "tool_calls": tool_calls,
+                            "stop_reason": "stop_sequence",
+                            "usage": {
+                                "input_tokens": usage["prompt_tokens"],
+                                "output_tokens": usage["completion_tokens"]
+                            }
+                        }
+                        return
+
+                async for chunk in process_and_yield_buffer():
+                    yield chunk
+
 
     def _mock_generate(self, internal_req: dict) -> dict:
         """Generate mock response for testing."""

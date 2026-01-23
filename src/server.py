@@ -119,8 +119,9 @@ async def anthropic_messages(request: Request) -> Response:
         generator = bridge.stream_anthropic(body, cache_name=cache_name)
         try:
             # Multi-step iterator to catch exceptions before StreamingResponse starts
-            # We peek at the first chunk to trigger init_inference (where overflow is checked)
+            # We must use threading to avoid blocking the event loop during heavy prefill
             try:
+                # The first __anext__ includes the heavy init_inference call
                 first_chunk = await generator.__anext__()
             except StopAsyncIteration:
                 return StreamingResponse(iter([]), media_type="text/event-stream")
@@ -135,10 +136,12 @@ async def anthropic_messages(request: Request) -> Response:
                 media_type="text/event-stream",
             )
         except ContextLimitExceededError as e:
-            # Re-raise to let the global exception handler return a proper 400 JSONResponse
             raise e
         except Exception as e:
-            logger.exception(f"Error initializing stream: {e}")
+            if config and not config.debug:
+                logger.error(f"Error initializing stream: {e}")
+            else:
+                logger.exception(f"Error initializing stream: {e}")
             return JSONResponse(
                 status_code=500,
                 content={"error": {"message": str(e), "type": "server_error"}}

@@ -18,7 +18,7 @@ path = "unsloth/MiMo-V2-Flash-GGUF/UD-Q6_K_XL/"
 
 [caches.main]
 model = "mimo"
-n_ctx = 262144                     # 256K for main conversation
+n_ctx = 131072                     # 128K for main conversation
 description = "Main conversation (Sonnet-level)"
 
 [caches.fast]

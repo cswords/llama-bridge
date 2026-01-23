@@ -15,7 +15,9 @@ CONFIGS = [
     "configs/qwen30b-coder.toml",
     "configs/mimo-v2.toml",
     "configs/minimax-m2.1.toml",
-    "configs/glm4-reap.toml"
+    "configs/glm4-reap.toml",
+    "configs/glm4-flash.toml",
+    "configs/gpt-oss-120b.toml"
 ]
 
 def wait_for_server(url, timeout=300):
@@ -59,10 +61,44 @@ def run_benchmark():
             
         print(f"Server ready in {startup_duration:.2f}s")
         
-        # Test using Claude Code CLI (more realistic)
         prompt = "Hi, who are you?"
+        import httpx
+        url_cmp = f"{url}/v1/chat/completions"
+        payload = {
+            "model": "benchmark",
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False
+        }
         
-        # Cold Request
+        raw_latency = 0.0
+        
+        # 0. Sanity Check (Raw API)
+        print("Performing Raw API Sanity Check...")
+        try:
+            with httpx.Client(timeout=60.0) as client:
+                t_s = time.time()
+                res_s = client.post(url_cmp, json=payload)
+                t_e = time.time()
+                raw_latency = t_e - t_s
+                print(f"Raw API Response in {raw_latency:.2f}s")
+        except Exception as e:
+            print(f"Sanity check failed: {e}")
+
+        # 0.1 Sanity Check (Streaming)
+        print("Performing Streaming Raw API Sanity Check...")
+        try:
+            payload_stream = payload.copy()
+            payload_stream["stream"] = True
+            t_s = time.time()
+            with httpx.stream("POST", url_cmp, json=payload_stream, timeout=60.0) as r:
+                for line in r.iter_lines():
+                    pass # just consume
+            t_e = time.time()
+            print(f"Raw Streaming API completed in {t_e - t_s:.2f}s")
+        except Exception as e:
+            print(f"Streaming sanity check failed: {e}")
+
+        # 1. Cold Request via Claude Code
         print("Sending cold request via Claude Code...")
         t_cold_start = time.time()
         result_cold = subprocess.run(
@@ -77,7 +113,7 @@ def run_benchmark():
         if result_cold.returncode != 0:
             print(f"WARNING: Cold request failed: {result_cold.stderr}")
         
-        # Hot Request
+        # 2. Hot Request via Claude Code
         print("Sending hot request via Claude Code...")
         t_hot_start = time.time()
         result_hot = subprocess.run(
@@ -95,23 +131,24 @@ def run_benchmark():
         results.append({
             "config": config_path,
             "startup": startup_duration,
+            "raw": raw_latency,
             "cold": cold_latency,
             "hot": hot_latency
         })
         
-        print(f"Cold: {cold_latency:.2f}s | Hot: {hot_latency:.2f}s")
+        print(f"Cold: {cold_latency:.2f}s | Hot: {hot_latency:.2f}s | Raw: {raw_latency:.2f}s")
         
         # Stop server
         process.terminate()
         process.wait()
         
     # Print Summary Table
-    print("\n" + "="*60)
-    print(f"{'Config':<30} | {'Startup':<8} | {'Cold':<8} | {'Hot':<8}")
-    print("-" * 60)
+    print("\n" + "="*80)
+    print(f"{'Config':<30} | {'Startup':<8} | {'Raw API':<8} | {'CC Cold':<8} | {'CC Hot':<8}")
+    print("-" * 80)
     for res in results:
-        print(f"{res['config']:<30} | {res['startup']:>7.2f}s | {res['cold']:>7.2f}s | {res['hot']:>7.2f}s")
-    print("="*60)
+        print(f"{res['config']:<30} | {res['startup']:>7.2f}s | {res['raw']:>7.2f}s | {res['cold']:>7.2f}s | {res['hot']:>7.2f}s")
+    print("="*80)
 
 if __name__ == "__main__":
     # Ensure we don't have a port conflict

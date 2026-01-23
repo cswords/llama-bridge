@@ -86,6 +86,9 @@ graph TD
 ### 3.2 Python Bridge (`src/bridge.py`)
 连接 Web 服务和 C++ 推理的核心胶水层。
 - **适配器模式**: `AnthropicAdapter` 和 `OpenAIAdapter` 处理协议差异。
+- **模型翻译层 (Model Translation Layers)**: 对于具有特殊工具调用格式的模型（如 Qwen 的 XML 格式或 MiniMax-M2 的 `<minimax:tool_call>` 格式），我们在 Python 层实现了专门的解析器（`_parse_qwen_tool_calls`, `_parse_minimax_tool_calls`）。
+    - **无状态设计**: C++ 包装器保持简单且无状态，不存储模型特定的解析规则。
+    - **双层防护**: 流式生成时，Python 层的 `process_and_yield_buffer` 会主动抑制特有的 XML 标签，确保 UI 洁净，同时在生成结束时进行完整解析以提取结构化数据。
 - **流式处理**: 实现了智能的 `_stream_generate` 循环，能够处理结构化输出（如 `<thought>`），支持从 C++ 解析结果或 Python 正则 fallback 中提取内容。
 - **异常桥接**: 将 C++ `RuntimeError` 映射为 Python `ContextLimitExceededError`。
 

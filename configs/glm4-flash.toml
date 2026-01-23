@@ -1,31 +1,24 @@
-# Copyright (c) 2026 Llama-Bridge Authors.
-# This software is released under the GNU General Public License v3.0.
-# See the LICENSE file in the project root for full license information.
-
-# Llama-Bridge Configuration for MiniMax-M2.1 (Q8_0)
+# Llama-Bridge Configuration for GLM-4.7-Flash
 # 
-# MiniMax-M2.1 is a powerful MoE model with extremely long context support.
-# The model natively supports up to 1M+ tokens context, but is capped here
-# for practical memory management on consumer hardware.
 
 # ============================================================
 # Model Definition
 # ============================================================
-[models.minimax]
-path = "unsloth/MiniMax-M2.1-GGUF/Q8_0/"
+[models.glm4flash]
+path = "models/ggml-org/GLM-4.7-Flash-GGUF/GLM-4.7-Flash-Q4_K.gguf"
 
 # ============================================================
 # Cache Definitions
 # ============================================================
 
 [caches.main]
-model = "minimax"
-n_ctx = 131072                     # 128K Context for main tasks
+model = "glm4flash"
+n_ctx = 131072                     # 128K Context
 description = "Main conversation"
 
 [caches.fast]
-model = "minimax"
-n_ctx = 131072                      # 128K Context for background/fast tasks (same as main, isolated)
+model = "glm4flash"
+n_ctx = 32768
 description = "Background tasks"
 
 # ============================================================

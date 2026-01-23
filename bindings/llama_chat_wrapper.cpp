@@ -127,8 +127,6 @@ public:
    */
   void create_context(const std::string &name, int32_t n_ctx) {
     if (contexts_.count(name)) {
-      std::cerr << "DEBUG: Context '" << name
-                << "' already exists, skipping creation" << std::endl;
       return;
     }
 
@@ -160,9 +158,6 @@ public:
     state.ctx = ctx;
     state.sampler = sampler;
     contexts_[name] = state;
-
-    std::cerr << "DEBUG: Created context '" << name << "' with n_ctx=" << n_ctx
-              << std::endl;
   }
 
   /**
@@ -173,7 +168,6 @@ public:
       throw std::runtime_error("Context not found: " + name);
     }
     active_context_ = name;
-    std::cerr << "DEBUG: Selected context '" << name << "'" << std::endl;
   }
 
   /**
@@ -337,17 +331,10 @@ public:
       llama_memory_seq_rm(mem, -1, (llama_pos)n_keep, -1);
     }
 
-    // Handle full cache hit
+    // Handle prompt cache status
     if (n_keep == tokens.size() && n_keep > 0) {
       n_keep--;
       llama_memory_seq_rm(mem, 0, (llama_pos)n_keep, -1);
-      std::cerr << "DEBUG: [" << active_context_
-                << "] Prompt cache full hit, re-decoding last token at pos "
-                << n_keep << std::endl;
-    } else {
-      std::cerr << "DEBUG: [" << active_context_
-                << "] Prompt cache partial hit: n_keep=" << n_keep
-                << " tokens=" << tokens.size() << std::endl;
     }
 
     // Check context space
@@ -399,9 +386,9 @@ public:
   }
 
   /**
-   * Get next token from active context. Returns empty string if EOS.
+   * Internal helper to get next token as a C++ string (raw bytes).
    */
-  std::string get_next_token() {
+  std::string get_next_token_internal() {
     ContextState &state = contexts_.at(active_context_);
     llama_context *ctx = state.ctx;
     llama_sampler *sampler = state.sampler;
@@ -415,7 +402,7 @@ public:
 
     state.n_gen_tokens++;
 
-    // Convert to piece
+    // Convert to piece (raw bytes)
     std::string piece = common_token_to_piece(ctx, id, true);
 
     // Decode this token for next turn
@@ -434,13 +421,19 @@ public:
   }
 
   /**
+   * Get next token from active context. Returns bytes for Python.
+   * Empty bytes means EOS.
+   */
+  py::bytes get_next_token() { return py::bytes(get_next_token_internal()); }
+
+  /**
    * Simple non-streaming generate.
    */
   std::string generate(const std::string &prompt, int max_tokens = 4096) {
     init_inference(prompt, max_tokens);
     std::string result;
     for (int i = 0; i < max_tokens; i++) {
-      std::string token = get_next_token();
+      std::string token = get_next_token_internal();
       if (token.empty())
         break;
       result += token;
