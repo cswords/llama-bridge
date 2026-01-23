@@ -218,13 +218,13 @@ Typical end-to-end latency with Claude Code (including CLI overhead):
 
 | Model | Total Params | Active Params | Quant | CC Cold (E2E) | CC Hot (KV Cache) | Raw API (Direct) | Gain |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Qwen 2.5 3B** | 3B | 3B | Q4_K_M | ~11s | **~1.3s** | **0.24s** | **88%** |
-| **Qwen 2.5 30B** | 32B | 32B | Q5_K_M | ~25s | **~5.5s** | **0.80s** | **78%** |
-| **GLM-4.7-Flash** | ~20B | ~20B | Q4_K | ~33s | **~6.0s** | **3.88s** | **82%** |
-| **gpt-oss-120b** | 120B | 120B | MXFP4 | ~29s | **~6.0s** | **1.46s** | **79%** |
-| **MiniMax M2.1** | 230B | 10B | Q8_0 | ~65s | **~8.4s** | **4.10s** | **87%** |
-| **MiMo-V2** | ~314B | ~86B | Q6_XL | ~87s | **~14.4s** | **1.53s** | **83%** |
-| **GLM-4.7-REAP** | 218B | 218B | Q2_K | ~166s | **~23.4s** | **12.03s** | **86%** |
+| **Qwen 2.5 3B** | 3B | 3B | Q4_K_M | ~11s | **~1.6s** | **0.24s** | **85%** |
+| **Qwen 2.5 30B** | 32B | 32B | Q5_K_M | ~30s | **~9.6s** | **0.81s** | **68%** |
+| **GLM-4.7-Flash** | ~20B | ~20B | Q4_K | ~35s | **~10.0s** | **3.85s** | **71%** |
+| **gpt-oss-120b** | 120B | 120B | MXFP4 | ~30s | **~8.7s** | **1.46s** | **71%** |
+| **MiniMax M2.1** | 230B | 10B | Q8_0 | ~68s | **~15.1s** | **4.09s** | **78%** |
+| **MiMo-V2** | ~314B | ~86B | Q6_XL | ~82s | **~12.6s** | **1.48s** | **84%** |
+| **GLM-4.7-REAP** | 218B | 218B | Q2_K | ~181s | **~45.1s** | **11.97s** | **75%** |
 
 *Note: Latency includes Claude Code startup overhead. Raw API latency is even lower (<0.5s for 3B, <5s for 456B).*
 

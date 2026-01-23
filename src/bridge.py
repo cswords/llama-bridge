@@ -639,117 +639,34 @@ class Bridge:
             
             # 3. Stream loop
             full_raw = ""
-            last_pos = 0     # Strictly monotonic index into full_raw
-            current_mode = "text" # "text", "thought", or "suppress"
-            actual_stop_seq = None
+            from src.utils.scanner import StreamScanner
+            scanner = StreamScanner()
             last_yield_time = time.time()
+            actual_stop_seq = None
             decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
             
+            scanner_index = 0
+            
             async def process_and_yield_buffer(force: bool = False):
-                """Monotonic scanner to process full_raw and yield deltas."""
-                nonlocal full_raw, last_pos, current_mode, last_yield_time
+                nonlocal full_raw, scanner_index, last_yield_time
                 
                 if not force and (time.time() - last_yield_time) < 0.05:
                     return
 
-                # Scan from last_pos to end of full_raw
-                # We identify boundaries for <thought>, <think>, and tool tags.
-                while last_pos < len(full_raw):
-                    remaining = full_raw[last_pos:]
-                    
-                    # 1. Handle Thought Mode
-                    if current_mode == "thought":
-                        # Look for end of thought
-                        end_match = re.search(r'</(?:thought|think)>', remaining)
-                        if end_match:
-                            # Yield delta up to tag start
-                            delta = remaining[:end_match.start()]
-                            if delta: yield {"thought": delta}
-                            last_pos += end_match.end()
-                            current_mode = "text"
-                            continue
-                        else:
-                            # Still in thought. But wait if we might have a partial closing tag
-                            if not force:
-                                last_lt = remaining.rfind('<')
-                                if last_lt != -1 and re.match(r'</?(?:th|think|thought).*?$', remaining[last_lt:]):
-                                    # Pause before potential tag
-                                    delta = remaining[:last_lt]
-                                    if delta: yield {"thought": delta}
-                                    last_pos += last_lt
-                                    break # Wait for more data
-                            
-                            # Entire remaining is thought
-                            yield {"thought": remaining}
-                            last_pos += len(remaining)
-                            break
-                    
-                    # 1.1 Handle Suppress Mode (for tool calls)
-                    elif current_mode == "suppress":
-                        # Look for end of suppression
-                        end_match = re.search(r'</(?:tool_call|minimax:tool_call)>', remaining)
-                        if end_match:
-                            last_pos += end_match.end()
-                            current_mode = "text"
-                            continue
-                        else:
-                            # Still suppressing, wait for more
-                            last_pos += len(remaining)
-                            break
-                    
-                    # 2. Handle Text mode
-                    else:
-                        # Look for start of thought, tool call, OR any closing tag we want to suppress
-                        # Tool tags: <tool_call>, <minimax:tool_call>, <function=, <invoke
-                        # Closing tags: </thought>, </think>, </minimax:tool_call>, </invoke>, </tool_call>, </function>
-                        combined_pat = r'<(?:thought|think|tool_call|minimax:tool_call|function=|invoke)|</(?:thought|think|tool_call|minimax:tool_call|function|invoke)>'
-                        match = re.search(combined_pat, remaining)
+                new_data = full_raw[scanner_index:]
+                if not new_data and not force:
+                    return
+                
+                # Feed new data to scanner
+                results = scanner.consume(new_data, is_final=force)
+                scanner_index += len(new_data)
+                
+                for type_, text in results:
+                    if type_ == "content":
+                        yield {"content": text}
+                    elif type_ == "thought":
+                        yield {"thought": text}
                         
-                        if match:
-                            # Yield text before tag
-                            delta = remaining[:match.start()]
-                            if delta: yield {"content": delta}
-                            
-                            tag = match.group(0)
-                            
-                            if tag.startswith('</'):
-                                # It's a closing tag in text mode - just ignore/suppress it
-                                last_pos += match.end()
-                                continue
-                            else:
-                                # It's an opening tag
-                                tag_type = tag.strip('<')
-                                if tag_type in ["thought", "think"]:
-                                    current_mode = "thought"
-                                    last_pos += match.end()
-                                elif tag_type in ["tool_call", "minimax:tool_call"]:
-                                    current_mode = "suppress"
-                                    last_pos += match.end()
-                                else:
-                                    # It's a tag like <invoke or <function= that needs skipping to the end of the tag
-                                    tag_end = full_raw.find('>', last_pos + match.start())
-                                    if tag_end != -1:
-                                        last_pos = tag_end + 1
-                                    else:
-                                        # Tag is not closed yet, wait for more data
-                                        last_pos += match.start() # Position back to before the tag
-                                        break
-                                continue
-                        else:
-                            # No tags found in remaining
-                            # Check for partial tag at the end
-                            if not force:
-                                last_lt = remaining.rfind('<')
-                                if last_lt != -1 and re.match(r'</?[a-zA-Z0-9_=:]*$', remaining[last_lt:]):
-                                    delta = remaining[:last_lt]
-                                    if delta: yield {"content": delta}
-                                    last_pos += last_lt
-                                    break
-                            
-                            yield {"content": remaining}
-                            last_pos += len(remaining)
-                            break
-
                 last_yield_time = time.time()
 
             while True:
