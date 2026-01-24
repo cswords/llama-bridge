@@ -49,5 +49,5 @@ target-version = ["py311"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["tests"]
+testpaths = ["src/tests"]
 python_files = ["test_*.py"]

@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 
 
 from src.bridge.flavors import get_flavor_for_model
+from src.bridge.scanner import StreamScanner
 
 class BridgeBase:
     """
@@ -145,6 +146,16 @@ class BridgeBase:
                 f.write(str(data))
         
         logger.debug(f"Logged Step {stage}: {filename}")
+
+    def _log_stream_chunk(self, chunk: dict, log_id: str) -> None:
+        """Log a single stream chunk to the stream dump file."""
+        if not self.debug:
+            return
+        
+        log_dir = Path("logs") / log_id
+        # We assume log_dir exists because _log_request(1...) is called first
+        with open(log_dir / "4_stream_dump.jsonl", "a") as f:
+            f.write(json.dumps(chunk, ensure_ascii=False) + "\n")
 
     def _normalize_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Normalize messages for llama.cpp, handling multi-block content and flattening tool_calls."""
@@ -308,6 +319,7 @@ class BridgeBase:
         
         # Authority Stage 2: Use C++ side common_chat_parse
         parsed = self.wrapper.parse_response(raw_response, False)
+        self._log_request(4, "parsed_response", parsed, log_id)
         usage = self.wrapper.get_usage(ctx_to_use)
         
         content = parsed.get("content", "").strip()
@@ -361,7 +373,7 @@ class BridgeBase:
             },
             "full_raw": raw_response
         }
-        self._log_request(4, "final_response", result, log_id)
+        self._log_request(5, "final_response", result, log_id)
         return result
 
     @contextlib.contextmanager
@@ -393,11 +405,17 @@ class BridgeBase:
                     break
             
             if "list files" in last_user_msg.lower():
-                yield {"content": "I have executed the request. Found src/ and other files via ls.", "stop_reason": None}
+                chunk = {"content": "I have executed the request. Found src/ and other files via ls.", "stop_reason": None}
+                self._log_stream_chunk(chunk, log_id)
+                yield chunk
             else:
-                yield {"content": "Mock streaming content.", "stop_reason": None}
+                chunk = {"content": "Mock streaming content.", "stop_reason": None}
+                self._log_stream_chunk(chunk, log_id)
+                yield chunk
                 
-            yield {"content": "", "stop_reason": "end_turn", "usage": {"input_tokens": 10, "output_tokens": 10}}
+            chunk = {"content": "", "stop_reason": "end_turn", "usage": {"input_tokens": 10, "output_tokens": 10}}
+            self._log_stream_chunk(chunk, log_id)
+            yield chunk
             return
 
         # Select the target context
@@ -478,17 +496,79 @@ class BridgeBase:
             
             # 3. Stream loop
             full_raw = ""
-            from .scanner import StreamScanner
             scanner = StreamScanner(protected_tags=self.flavor.protected_tags)
+            
+            # --- PREFILL STATE SYNCHRONIZATION ---
+            # Use prefill to synchronize scanner state (e.g. if we are already inside a <think> block)
+            
+            block_content_stack = [] # List of [tag_type, content]
+            prefill_source = None
+            
+            # 1. Try explicit Assistant content from messages (User provided prefill)
+            last_msg = internal_req.get("messages", [])[-1] if internal_req.get("messages") else None
+            if last_msg and last_msg.get("role") == "assistant" and last_msg.get("content"):
+                prefill_source = last_msg["content"]
+            
+            # 2. If no explicit prefill, check Prompt tail for Implicit Prefill
+            # Algorithm: Find the LAST occurrence of any Block Start Tag.
+            # If it exists, and is NOT followed by its matching Close Tag, then it is an Open Block.
+            if not prefill_source and prompt:
+                last_open_tag_pos = -1
+                
+                for tag_name in self.flavor.block_tags:
+                    start_marker = f"<{tag_name}"
+                    p = prompt.rfind(start_marker)
+                    
+                    if p > last_open_tag_pos:
+                        # Found a candidate start tag. Check if it is closed.
+                        end_marker = f"</{tag_name}>"
+                        p_end = prompt.find(end_marker, p)
+                        
+                        if p_end == -1:
+                            # It is NOT closed. This is our winner so far.
+                            last_open_tag_pos = p
+                
+                if last_open_tag_pos != -1:
+                    prefill_source = prompt[last_open_tag_pos:]
+
+            if prefill_source:
+                # Push prefill text to scanner
+                pre_events = scanner.push(prefill_source)
+                
+                # Process events to update STACK only (suppress output)
+                for ev in pre_events:
+                    if ev.type == "block_start":
+                        block_content_stack.append([ev.tag, ""])
+                        # Also append the tag itself to parent blocks if any
+                        for item in block_content_stack[:-1]:
+                            item[1] += ev.data
+                    elif ev.type == "block_end":
+                        if block_content_stack:
+                            # We don't interpret/emit closed blocks from prefill, just pop stack
+                            _, content = block_content_stack.pop()
+                            # Append closing tag to parent blocks
+                            for item in block_content_stack:
+                                item[1] += ev.data
+                    elif ev.type == "block_content":
+                        # Accumulate in active blocks
+                        for item in block_content_stack:
+                            item[1] += ev.data
+                    # "content" events (plain text in prefill) are ignored/suppressed
+                
+                # IMPORTANT: Clear the buffer. We don't want any partial text from the prompt 
+                # to be emitted as the start of the response.
+                scanner.buffer = ""
+            
+            # Fix: Ensure full_raw includes the prefill so C++ parser sees the full block
+            if prefill_source:
+                full_raw = prefill_source
+
             last_yield_time = time.time()
             actual_stop_seq = None
             decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
             
-            scanner_index = 0
+            scanner_index = len(full_raw)
             final_tool_calls = []
-            
-            # For accumulating content within blocks (handles nesting)
-            block_content_stack = [] # List of [tag_type, content]
 
             async def process_and_yield_buffer(force: bool = False):
                 nonlocal full_raw, scanner_index, last_yield_time, final_tool_calls, block_content_stack
@@ -541,13 +621,16 @@ class BridgeBase:
                 if not new_bytes: # EOS
                     full_raw += decoder.decode(b"", final=True)
                     async for chunk in process_and_yield_buffer(force=True):
+                        self._log_stream_chunk(chunk, log_id)
                         yield chunk
                     
                     # Authority Stage 2 (Final): Re-verify tools with C++ parser
                     parsed = self.wrapper.parse_response(full_raw, False)
+                    self._log_request(5, "parsed_response", parsed, log_id)
                     tc = parsed.get("tool_calls", [])
                     if tc and not final_tool_calls:
                         final_tool_calls = tc
+                    
                     
                     usage = self.wrapper.get_usage(ctx_to_use)
                     stop_reason = "tool_use" if final_tool_calls else "end_turn"
@@ -557,6 +640,7 @@ class BridgeBase:
                     self._log_request(3, "raw_output", full_raw, log_id)
                     final_chunk = {
                         "content": "", 
+                        "reasoning_content": parsed.get("reasoning_content", ""),
                         "tool_calls": final_tool_calls,
                         "stop_reason": stop_reason,
                         "usage": {
@@ -565,7 +649,7 @@ class BridgeBase:
                         },
                         "full_raw": full_raw
                     }
-                    self._log_request(4, "final_response", final_chunk, log_id)
+                    self._log_stream_chunk(final_chunk, log_id)
                     yield final_chunk
                     break
                 
@@ -577,10 +661,12 @@ class BridgeBase:
                         full_raw = full_raw[:-len(s)]
                         full_raw += decoder.decode(b"", final=True)
                         async for chunk in process_and_yield_buffer(force=True):
+                            self._log_stream_chunk(chunk, log_id)
                             yield chunk
                         
                         # Authority Stage 2 (Final): Re-verify tools
                         parsed = self.wrapper.parse_response(full_raw, False)
+                        self._log_request(5, "parsed_response", parsed, log_id)
                         tc = parsed.get("tool_calls", [])
                         if tc and not final_tool_calls:
                             final_tool_calls = tc
@@ -589,6 +675,7 @@ class BridgeBase:
                         self._log_request(3, "raw_output", full_raw, log_id)
                         final_chunk = {
                             "content": "",
+                            "reasoning_content": parsed.get("reasoning_content", ""),
                             "tool_calls": final_tool_calls,
                             "stop_reason": "stop_sequence",
                             "usage": {
@@ -597,12 +684,13 @@ class BridgeBase:
                             },
                             "full_raw": full_raw
                         }
-                        self._log_request(4, "final_response", final_chunk, log_id)
+                        self._log_stream_chunk(final_chunk, log_id)
                         yield final_chunk
                         return
 
                 if (time.time() - last_yield_time) > 0.03:
                     async for chunk in process_and_yield_buffer():
+                        self._log_stream_chunk(chunk, log_id)
                         yield chunk
                     last_yield_time = time.time()
 

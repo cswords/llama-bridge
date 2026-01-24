@@ -99,8 +99,6 @@ public:
 
     // Create default context
     create_context("default", n_ctx_default_);
-    active_context_ = "default";
-
     loaded_ = true;
   }
 
@@ -158,16 +156,6 @@ public:
     state.ctx = ctx;
     state.sampler = sampler;
     contexts_[name] = state;
-  }
-
-  /**
-   * Select active context for inference.
-   */
-  void select_context(const std::string &name) {
-    if (!contexts_.count(name)) {
-      throw std::runtime_error("Context not found: " + name);
-    }
-    active_context_ = name;
   }
 
   /**
@@ -295,10 +283,15 @@ public:
   }
 
   /**
-   * Initialize inference with a prompt on the active context.
+   * Initialize inference with a prompt on the specified context.
    */
-  void init_inference(const std::string &prompt, int max_tokens = 0) {
-    ContextState &state = contexts_.at(active_context_);
+  void init_inference(const std::string &name, const std::string &prompt,
+                      int max_tokens = 0) {
+    auto it = contexts_.find(name);
+    if (it == contexts_.end()) {
+      throw std::runtime_error("Context not found: " + name);
+    }
+    ContextState &state = it->second;
     llama_context *ctx = state.ctx;
 
     // Tokenize
@@ -307,11 +300,10 @@ public:
     // Context Overflow Check
     int32_t n_ctx = llama_n_ctx(ctx);
     int32_t n_prompt = tokens.size();
-    if (n_prompt + max_tokens > n_ctx) {
-      std::string msg = "ContextLimitExceeded: Request (" +
-                        std::to_string(n_prompt + max_tokens) +
-                        " tokens) exceeds context limit (" +
-                        std::to_string(n_ctx) + ")";
+    if (n_prompt >= n_ctx) {
+      std::string msg =
+          "ContextLimitExceeded: Request (" + std::to_string(n_prompt) +
+          " tokens) exceeds context limit (" + std::to_string(n_ctx) + ")";
       throw std::runtime_error(msg);
     }
 
@@ -344,7 +336,7 @@ public:
     int32_t n_needed = (int32_t)tokens.size() - (int32_t)n_keep;
 
     if (n_used + n_needed > n_ctx_total) {
-      std::cerr << "CRITICAL: [" << active_context_
+      std::cerr << "CRITICAL: [" << name
                 << "] Not enough KV cache space. Used=" << n_used
                 << " Need=" << n_needed << " Total=" << n_ctx_total
                 << std::endl;
@@ -366,7 +358,7 @@ public:
 
       llama_batch batch = llama_batch_init(n_eval, 0, 1);
       for (int32_t j = 0; j < n_eval; j++) {
-        common_batch_add(batch, tokens[i + j], (int32_t)(i + j), {0}, false);
+        common_batch_add(batch, tokens[i + j], (llama_pos)(i + j), {0}, false);
       }
 
       // Only request logits for the last token of the entire prompt
@@ -388,8 +380,12 @@ public:
   /**
    * Internal helper to get next token as a C++ string (raw bytes).
    */
-  std::string get_next_token_internal() {
-    ContextState &state = contexts_.at(active_context_);
+  std::string get_next_token_internal(const std::string &name) {
+    auto it = contexts_.find(name);
+    if (it == contexts_.end()) {
+      return "";
+    }
+    ContextState &state = it->second;
     llama_context *ctx = state.ctx;
     llama_sampler *sampler = state.sampler;
 
@@ -407,7 +403,7 @@ public:
 
     // Decode this token for next turn
     llama_batch batch = llama_batch_init(1, 0, 1);
-    common_batch_add(batch, id, state.n_past, {0}, true);
+    common_batch_add(batch, id, (llama_pos)state.n_past, {0}, true);
 
     if (llama_decode(ctx, batch) != 0) {
       llama_batch_free(batch);
@@ -421,19 +417,22 @@ public:
   }
 
   /**
-   * Get next token from active context. Returns bytes for Python.
+   * Get next token from specified context. Returns bytes for Python.
    * Empty bytes means EOS.
    */
-  py::bytes get_next_token() { return py::bytes(get_next_token_internal()); }
+  py::bytes get_next_token(const std::string &name) {
+    return py::bytes(get_next_token_internal(name));
+  }
 
   /**
    * Simple non-streaming generate.
    */
-  std::string generate(const std::string &prompt, int max_tokens = 4096) {
-    init_inference(prompt, max_tokens);
+  std::string generate(const std::string &name, const std::string &prompt,
+                       int max_tokens = 4096) {
+    init_inference(name, prompt, max_tokens);
     std::string result;
     for (int i = 0; i < max_tokens; i++) {
-      std::string token = get_next_token_internal();
+      std::string token = get_next_token_internal(name);
       if (token.empty())
         break;
       result += token;
@@ -448,6 +447,10 @@ public:
     if (model_) {
       info["n_vocab"] = llama_vocab_n_tokens(vocab_);
       info["n_ctx_train"] = llama_model_n_ctx_train(model_);
+      info["n_batch"] = n_batch_;
+      info["n_ubatch"] = n_ubatch_;
+      info["n_threads"] = n_threads_;
+      info["flash_attn"] = flash_attn_;
     }
     // Include context info
     py::list ctx_list;
@@ -460,14 +463,17 @@ public:
       ctx_list.append(ctx_info);
     }
     info["contexts"] = ctx_list;
-    info["active_context"] = active_context_;
     return info;
   }
 
-  py::dict get_usage() const {
-    const ContextState &state = contexts_.at(active_context_);
+  py::dict get_usage(const std::string &name) const {
+    auto it = contexts_.find(name);
+    if (it == contexts_.end()) {
+      throw std::runtime_error("Context not found: " + name);
+    }
+    const ContextState &state = it->second;
     py::dict usage;
-    usage["context"] = active_context_;
+    usage["context"] = name;
     usage["prompt_tokens"] = state.n_prompt_tokens;
     usage["completion_tokens"] = state.n_gen_tokens;
     usage["total_tokens"] = state.n_prompt_tokens + state.n_gen_tokens;
@@ -490,7 +496,6 @@ private:
 
   // Multi-context support
   std::unordered_map<std::string, ContextState> contexts_;
-  std::string active_context_;
 };
 
 PYBIND11_MODULE(llama_chat, m) {
@@ -503,19 +508,18 @@ PYBIND11_MODULE(llama_chat, m) {
            py::arg("flash_attn") = false)
       .def("create_context", &LlamaChatWrapper::create_context, py::arg("name"),
            py::arg("n_ctx") = 0)
-      .def("select_context", &LlamaChatWrapper::select_context, py::arg("name"))
       .def("list_contexts", &LlamaChatWrapper::list_contexts)
       .def("apply_template", &LlamaChatWrapper::apply_template,
            py::arg("messages"), py::arg("tools"),
            py::arg("add_generation_prompt"))
       .def("parse_response", &LlamaChatWrapper::parse_response,
            py::arg("response_text"), py::arg("is_partial") = false)
-      .def("init_inference", &LlamaChatWrapper::init_inference,
+      .def("init_inference", &LlamaChatWrapper::init_inference, py::arg("name"),
            py::arg("prompt"), py::arg("max_tokens") = 0)
-      .def("get_next_token", &LlamaChatWrapper::get_next_token)
-      .def("generate", &LlamaChatWrapper::generate, py::arg("prompt"),
-           py::arg("max_tokens") = 4096)
+      .def("get_next_token", &LlamaChatWrapper::get_next_token, py::arg("name"))
+      .def("generate", &LlamaChatWrapper::generate, py::arg("name"),
+           py::arg("prompt"), py::arg("max_tokens") = 4096)
       .def("get_model_info", &LlamaChatWrapper::get_model_info)
-      .def("get_usage", &LlamaChatWrapper::get_usage);
-  m.def("version", []() { return "0.2.0"; });
+      .def("get_usage", &LlamaChatWrapper::get_usage, py::arg("name"));
+  m.def("version", []() { return "0.3.0"; });
 }

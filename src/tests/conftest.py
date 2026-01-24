@@ -64,7 +64,7 @@ class BridgeController:
         self._process = None
         self._mock_started = False
         self._original_base_url = os.environ.get("ANTHROPIC_BASE_URL")
-        self._project_root = Path(__file__).parent.parent
+        self._project_root = Path(__file__).parent.parent.parent
     
     @property
     def model_id(self) -> str:

@@ -83,8 +83,9 @@ graph TD
 - **Overflow Checks**: 在 `init_inference` 中硬性检查 `n_prompt + max_tokens > n_ctx`，并在溢出时抛出标准 C++ 异常。
 - **Chat Templates**: 复用了 llama.cpp 强大的 Jinja2 模板引擎。
 
-### 3.2 Python Bridge (`src/bridge.py`)
+### 3.2 Python Bridge (`src/bridge/`)
 连接 Web 服务和 C++ 推理的核心胶水层。
+- **模块化架构**: 该组件被拆分为 `base.py` (通用核心逻辑)、`anthropic.py` (Anthropic 协议集成) 和 `openai.py` (OpenAI 协议集成)，极大地提高了可维护性。
 - **适配器模式**: `AnthropicAdapter` 和 `OpenAIAdapter` 处理协议差异。
 - **模型翻译层 (Model Translation Layers)**: 对于具有特殊工具调用格式的模型（如 Qwen 的 XML 格式或 MiniMax-M2 的 `<minimax:tool_call>` 格式），我们在 Python 层实现了专门的解析器（`_parse_qwen_tool_calls`, `_parse_minimax_tool_calls`）。
     - **无状态设计**: C++ 包装器保持简单且无状态，不存储模型特定的解析规则。

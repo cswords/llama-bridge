@@ -260,7 +260,14 @@ async def health_check() -> dict:
         elif bridge.wrapper:
             model_loaded = True
             model_info = bridge.wrapper.get_model_info()
-            usage = bridge.wrapper.get_usage()
+            try:
+                if config and config.caches:
+                    for name in config.caches:
+                         usage[name] = bridge.wrapper.get_usage(name)
+                else:
+                     usage["main"] = bridge.wrapper.get_usage("main")
+            except Exception as e:
+                usage["error"] = str(e)
     
     # Include routing info
     routing_info = {}

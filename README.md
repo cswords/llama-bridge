@@ -202,10 +202,16 @@ uv run build
 
 ## 技术架构
 
-1.  **Core**: `llama.cpp` (C++) - 负责张量计算与词表管理。
-2.  **Binding**: `pybind11` (C++) - 将 `common/chat.h` 的模板处理与推理逻辑暴露给 Python。
-3.  **Adapter**: `LiteLLM` (Python) - 负责请求/响应格式的标准化转换。
-4.  **Server**: `FastAPI` (Python) - 提供高性能的异步 Web API。
+Llama-Bridge 采用高度解耦的流水线架构，确保了即使在处理复杂的模型（如自带 XML 标签的 MiniMax 或 Qwen）时，仍能提供极致的流式体验：
+
+1.  **Core (C++)**: `llama.cpp` 及其 Python 绑定。负责高性能张量计算、KV 缓存管理和基础 Token 采样。
+2.  **Framer (Scanner)**: 通用块分帧器。实时扫描字节流，利用状态机将原始文本与结构化块（如 `<thought>`, `<tool_call>`）进行物理隔离，支持实时泵出正文。
+3.  **Interpreter (Flavor)**: 语义解释器。针对不同模型风味（Qwen, MiniMax, Llama 等）定义解释逻辑：
+    *   **块解析**：将隔离出的块内容翻译为 API 标准格式（如从 XML 提取 Tool Calls）。
+    *   **流处理**：决定哪些块片段（Chunks）需要实时转发（如思考过程），哪些需要静默累加。
+    *   **模版重写**：针对特殊模型提供精准的 Prompt 模版映射。
+4.  **Orchestrator (Bridge)**: 混流调度器。将 Interpreter 的语义产物与 Framer 的正文流进行混流，最终通过适配器输出兼容 Anthropic/OpenAI 协议的 SSE 流。
+5.  **Server (FastAPI)**: 高性能异步网关。支持并发请求路由与多上下文线程安全调度。
 
 
 ---
@@ -218,13 +224,13 @@ Typical end-to-end latency with Claude Code (including CLI overhead):
 
 | Model | Total Params | Active Params | Quant | CC Cold (E2E) | CC Hot (KV Cache) | Raw API (Direct) | Gain |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Qwen 2.5 3B** | 3B | 3B | Q4_K_M | ~11s | **~1.6s** | **0.24s** | **85%** |
-| **Qwen 2.5 30B** | 32B | 32B | Q5_K_M | ~30s | **~9.6s** | **0.81s** | **68%** |
-| **GLM-4.7-Flash** | ~20B | ~20B | Q4_K | ~35s | **~10.0s** | **3.85s** | **71%** |
-| **gpt-oss-120b** | 120B | 120B | MXFP4 | ~30s | **~8.7s** | **1.46s** | **71%** |
-| **MiniMax M2.1** | 230B | 10B | Q8_0 | ~68s | **~15.1s** | **4.09s** | **78%** |
-| **MiMo-V2** | ~314B | ~86B | Q6_XL | ~82s | **~12.6s** | **1.48s** | **84%** |
-| **GLM-4.7-REAP** | 218B | 218B | Q2_K | ~181s | **~45.1s** | **11.97s** | **75%** |
+| **Qwen 2.5 3B** | 3B | 3B | Q4_K_M | ~11.0s | **~1.36s** | **0.23s** | **88%** |
+| **Qwen 2.5 30B** | 32B | 32B | Q5_K_M | ~26.1s | **~5.62s** | **0.81s** | **78%** |
+| **GLM-4.7-Flash** | ~20B | ~20B | Q4_K | ~32.0s | **~5.48s** | **3.83s** | **83%** |
+| **gpt-oss-120b** | 120B | 120B | MXFP4 | ~29.5s | **~6.98s** | **1.37s** | **76%** |
+| **MiniMax M2.1** | 230B | 10B | Q8_0 | ~64.7s | **~9.36s** | **4.05s** | **86%** |
+| **MiMo-V2** | ~314B | ~86B | Q6_XL | ~79.1s | **~7.56s** | **1.49s** | **90%** |
+| **GLM-4.7-REAP** | 218B | 218B | Q2_K | ~166.5s | **~22.4s** | **11.93s** | **87%** |
 
 *Note: Latency includes Claude Code startup overhead. Raw API latency is even lower (<0.5s for 3B, <5s for 456B).*
 
