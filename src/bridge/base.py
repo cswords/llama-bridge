@@ -567,8 +567,18 @@ class BridgeBase:
                         p_end = prompt.find(end_marker, p)
                         
                         if p_end == -1:
-                            # It is NOT closed. This is our winner so far.
-                            last_open_tag_pos = p
+                            # It is NOT closed. 
+                            # FINAL CHECK: Ensure this open tag is not part of a previous turn.
+                            # If the text following this tag contains turn separators, it's likely just mentioned in history.
+                            candidate_segment = prompt[p:]
+                            # separators = self.flavor.turn_separators # Already defined? No need to redefine if it's property
+                            separators = self.flavor.turn_separators
+                            if separators:
+                                if not any(sep in candidate_segment for sep in separators):
+                                    last_open_tag_pos = p
+                            else:
+                                # No separators defined for this flavor, assume valid
+                                 last_open_tag_pos = p
                 
                 if last_open_tag_pos != -1:
                     prefill_source = prompt[last_open_tag_pos:]
@@ -580,14 +590,14 @@ class BridgeBase:
                 # Process events to update STACK only (suppress output)
                 for ev in pre_events:
                     if ev.type == "block_start":
-                        block_content_stack.append([ev.tag, ""])
+                        block_content_stack.append([ev.tag, "", False]) # Tag, Content, HasStreamed
                         # Also append the tag itself to parent blocks if any
                         for item in block_content_stack[:-1]:
                             item[1] += ev.data
                     elif ev.type == "block_end":
                         if block_content_stack:
                             # We don't interpret/emit closed blocks from prefill, just pop stack
-                            _, content = block_content_stack.pop()
+                            _, content, _ = block_content_stack.pop()
                             # Append closing tag to parent blocks
                             for item in block_content_stack:
                                 item[1] += ev.data
@@ -631,7 +641,7 @@ class BridgeBase:
                         # Add tag to parent blocks
                         for item in block_content_stack:
                             item[1] += ev.data
-                        block_content_stack.append([ev.tag, ""])
+                        block_content_stack.append([ev.tag, "", False])
                     elif ev.type == "block_content":
                         # Accumulate in all active blocks
                         for item in block_content_stack:
@@ -641,10 +651,12 @@ class BridgeBase:
                             leaf_tag = block_content_stack[-1][0]
                             interpretation = self.flavor.interpret_block_chunk(leaf_tag, ev.data)
                             if interpretation:
+                                # Mark as streamed
+                                block_content_stack[-1][2] = True
                                 yield {interpretation[0]: interpretation[1]}
                     elif ev.type == "block_end":
                         if block_content_stack:
-                            tag_type, full_content = block_content_stack.pop()
+                            tag_type, full_content, has_streamed = block_content_stack.pop()
                             # Add closing tag to parent blocks
                             for item in block_content_stack:
                                 item[1] += ev.data
@@ -656,6 +668,24 @@ class BridgeBase:
                                     final_tool_calls.extend(idata)
                                 else:
                                     yield {itype: idata}
+                            elif not has_streamed:
+                                # Fallback: If block interpretation failed (e.g. hallucinated tag or invalid content)
+                                # AND we haven't streamed anything for it, yield raw text to prevent data loss.
+                                fallback_text = f"<{tag_type}>{full_content}{ev.data}"
+                                yield {"content": fallback_text}
+
+                # NEW: At EOS (force=True), if we still have open blocks that weren't interpreted/closed,
+                # flush them as raw content to prevent data loss.
+                if force and block_content_stack:
+                    leftover_text = ""
+                    if block_content_stack:
+                        # Reconstruct the TOP content and prepend the TOP tag.
+                        root_tag, root_content, _ = block_content_stack[0]
+                        leftover_text = f"<{root_tag}>{root_content}"
+                        
+                    block_content_stack.clear()
+                    if leftover_text:
+                        yield {"content": leftover_text}
 
             while True:
                 new_bytes = await asyncio.to_thread(self.wrapper.get_next_token, ctx_to_use)

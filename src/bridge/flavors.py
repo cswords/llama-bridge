@@ -21,6 +21,11 @@ class BaseFlavor:
             tags.append(f"</{bt}>")
         return tags
 
+    @property
+    def turn_separators(self) -> List[str]:
+        """Strings that mark the end of a turn or message boundary. Used to prevent prefill from greedily capturing history."""
+        return []
+
     def interpret_block_chunk(self, tag: str, chunk: str) -> Optional[Tuple[str, Any]]:
         """Interpret a partial block chunk. Returns (type, data)."""
         if tag in ["thought", "think"]:
@@ -44,6 +49,10 @@ class QwenFlavor(BaseFlavor):
     @property
     def protected_tags(self) -> List[str]:
         return super().protected_tags + ["<function=", "</function>", "<parameter=", "</parameter>"]
+
+    @property
+    def turn_separators(self) -> List[str]:
+        return ["<|im_end|>", "<|im_start|>"]
 
     def interpret_block_complete(self, tag: str, content: str) -> Optional[Tuple[str, Any]]:
         res = super().interpret_block_complete(tag, content)
