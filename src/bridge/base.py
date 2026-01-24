@@ -126,13 +126,22 @@ class BridgeBase:
                 "Please download a GGUF model and place it in the models/ directory."
             )
     
-    def _log_request(self, stage: int, filename: str, data: Any, log_id: str) -> None:
+    def _get_next_stage(self, log_dir: Path) -> int:
+        """Get the next stage number based on files in the directory."""
+        if not log_dir.exists():
+            return 1
+        existing = [f for f in log_dir.glob("*") if f.name[0].isdigit()]
+        return len(existing) + 1
+
+    def _log_request(self, filename: str, data: Any, log_id: str) -> None:
         """Log request/response data in debug mode (4-File Rule)."""
         if not self.debug:
             return
         
         log_dir = Path("logs") / log_id
         log_dir.mkdir(parents=True, exist_ok=True)
+        
+        stage = self._get_next_stage(log_dir)
         
         # Use .json for dict/list, .txt for everything else (raw model output)
         is_json = isinstance(data, (dict, list))
@@ -153,9 +162,42 @@ class BridgeBase:
             return
         
         log_dir = Path("logs") / log_id
-        # We assume log_dir exists because _log_request(1...) is called first
-        with open(log_dir / "4_stream_dump.jsonl", "a") as f:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Find existing stream dump or create new one
+        dumps = list(log_dir.glob("*_stream_dump.jsonl"))
+        if dumps:
+            filepath = dumps[0]
+        else:
+            stage = self._get_next_stage(log_dir)
+            filepath = log_dir / f"{stage}_stream_dump.jsonl"
+
+        with open(filepath, "a") as f:
             f.write(json.dumps(chunk, ensure_ascii=False) + "\n")
+
+    def _log_client_stream_event(self, event: str, log_id: str) -> None:
+        """Log a client-side SSE event string to a jsonl file."""
+        if not self.debug:
+            return
+        
+        log_dir = Path("logs") / log_id
+        log_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Find existing client stream dump or create new one
+        dumps = list(log_dir.glob("*_response_client_stream.jsonl"))
+        if dumps:
+            filepath = dumps[0]
+        else:
+            stage = self._get_next_stage(log_dir)
+            filepath = log_dir / f"{stage}_response_client_stream.jsonl"
+            
+        with open(filepath, "a") as f:
+            # Wrap in JSON with timestamp
+             record = {
+                 "ts": time.time(),
+                 "event": event
+             }
+             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     def _normalize_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Normalize messages for llama.cpp, handling multi-block content and flattening tool_calls."""
@@ -272,7 +314,7 @@ class BridgeBase:
         
         # 1. Truncation Loop
         log_id = log_id or str(uuid.uuid4())
-        self._log_request(1, "request_internal", internal_req, log_id)
+        self._log_request("request_internal", internal_req, log_id)
         
         raw_response = ""
         max_retries = 10
@@ -291,9 +333,9 @@ class BridgeBase:
                     logger.warning("Falling back to Flavor-based template (Model missing Jinja template)")
 
             try:
-                self._log_request(2, "prompt", prompt, log_id)
+                self._log_request("prompt", prompt, log_id)
                 raw_response = self.wrapper.generate(ctx_to_use, prompt, max_tokens)
-                self._log_request(3, "raw_output", raw_response, log_id)
+                self._log_request("raw_output", raw_response, log_id)
                 break # Success
             except RuntimeError as e:
                 msg = str(e)
@@ -319,7 +361,7 @@ class BridgeBase:
         
         # Authority Stage 2: Use C++ side common_chat_parse
         parsed = self.wrapper.parse_response(raw_response, False)
-        self._log_request(4, "parsed_response", parsed, log_id)
+        self._log_request("parsed_response", parsed, log_id)
         usage = self.wrapper.get_usage(ctx_to_use)
         
         content = parsed.get("content", "").strip()
@@ -373,7 +415,7 @@ class BridgeBase:
             },
             "full_raw": raw_response
         }
-        self._log_request(5, "final_response", result, log_id)
+        self._log_request("final_response", result, log_id)
         return result
 
     @contextlib.contextmanager
@@ -427,7 +469,7 @@ class BridgeBase:
 
         async with lock:
             # 1. Prepare and apply template
-            self._log_request(1, "request_internal", internal_req, log_id)
+            self._log_request("request_internal", internal_req, log_id)
             
             tools = self._prepare_tools(internal_req.get("tools", []))
             msgs_to_use = internal_req["messages"]
@@ -458,7 +500,7 @@ class BridgeBase:
                         logger.warning("Falling back to Flavor-based template (Model missing Jinja template)")
                 
                 try:
-                    self._log_request(2, "prompt", prompt, log_id)
+                    self._log_request("prompt", prompt, log_id)
                     await asyncio.to_thread(self.wrapper.init_inference, ctx_to_use, prompt, max_tokens)
                     break # Success
                 except RuntimeError as e:
@@ -626,7 +668,7 @@ class BridgeBase:
                     
                     # Authority Stage 2 (Final): Re-verify tools with C++ parser
                     parsed = self.wrapper.parse_response(full_raw, False)
-                    self._log_request(5, "parsed_response", parsed, log_id)
+                    self._log_request("parsed_response", parsed, log_id)
                     tc = parsed.get("tool_calls", [])
                     if tc and not final_tool_calls:
                         final_tool_calls = tc
@@ -637,7 +679,7 @@ class BridgeBase:
                     if not final_tool_calls and actual_stop_seq:
                         stop_reason = "stop_sequence"
 
-                    self._log_request(3, "raw_output", full_raw, log_id)
+                    self._log_request("raw_output", full_raw, log_id)
                     final_chunk = {
                         "content": "", 
                         "reasoning_content": parsed.get("reasoning_content", ""),
@@ -666,13 +708,13 @@ class BridgeBase:
                         
                         # Authority Stage 2 (Final): Re-verify tools
                         parsed = self.wrapper.parse_response(full_raw, False)
-                        self._log_request(5, "parsed_response", parsed, log_id)
+                        self._log_request("parsed_response", parsed, log_id)
                         tc = parsed.get("tool_calls", [])
                         if tc and not final_tool_calls:
                             final_tool_calls = tc
 
                         usage = self.wrapper.get_usage(ctx_to_use)
-                        self._log_request(3, "raw_output", full_raw, log_id)
+                        self._log_request("raw_output", full_raw, log_id)
                         final_chunk = {
                             "content": "",
                             "reasoning_content": parsed.get("reasoning_content", ""),
