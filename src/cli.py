@@ -52,11 +52,12 @@ def download_model():
     root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     script_path = os.path.join(root_dir, "scripts", "hfd.sh")
     
-    if not os.path.exists(script_path):
-        print(f"hfd.sh not found. Downloading to {script_path}...")
+    if not os.path.exists(script_path) or (os.path.exists(script_path) and "404" in open(script_path).read()):
+        print(f"hfd.sh missing or corrupted. Downloading to {script_path}...")
         os.makedirs(os.path.dirname(script_path), exist_ok=True)
-        url = "https://gist.githubusercontent.com/Gwada26/f67d4b4a15993883a4c4/raw/hfd.sh"
-        subprocess.run(["curl", "-s", "-o", script_path, url], check=True)
+        # Use a verified working Gist URL
+        url = "https://gist.githubusercontent.com/padeoe/697678ab8e528b85a2a7bddafea1fa4f/raw/hfd.sh"
+        subprocess.run(["curl", "-s", "-L", "-o", script_path, url], check=True)
         subprocess.run(["chmod", "+x", script_path], check=True)
         
     cmd = [script_path, repo_id, "--local-dir", local_dir] + args

@@ -96,6 +96,17 @@ graph TD
 ### 3.3 服务层 (`src/server.py`)
 - **Global Exception Handlers**: 统一捕获逻辑错误并映射为 API 错误格式（如 `invalid_request_error`），确保客户端不会收到令人困惑的 `500 Internal Server Error`。
 
+### 3.4 参数优化系统 (Parameter Optimization System)
+Llama-Bridge 集成了基于 `llama-bench` 的自动化参数调优功能，通过在目标硬件上实际运行基准测试来寻找最优配置。
+- **多维度搜索**：
+    - **线程与计算优化**：自动寻找计算线程 (`n_threads`) 的最优平衡点。
+    - **批处理优化**：测试 `n_batch` 和 `n_ubatch` 的组合，极大化 Prompt 处理 (PP) 吞吐。
+    - **Flash Attention**：验证 `-fa` (Flash Attention) 在当前硬件上的吞吐提升。
+    - **KV Cache 压缩**：测试 `f16` vs `q8_0` vs `q4_0` 等 KV Cache 格式，平衡显存占用与推理速度。
+- **交互模式**：
+    - `uv run optimize --config <path>`：对指定配置文件进行基准测试并以 TOML 格式在大屏输出推荐配置。
+    - **自动应用**：使用 `--apply` 参数时，系统会将最优参数（包括 `flash_attn`, `cache_type_k`, `cache_type_v` 等）直接回写至原配置文件。
+
 ---
 
 ## 4. 构建与安装 (Build & Setup)

@@ -6,6 +6,12 @@
 # Model Definition
 # ============================================================
 [models.glm4]
+n_ubatch = 512
+n_batch = 1024
+cache_type_v = 'f16'
+cache_type_k = 'f16'
+flash_attn = true
+n_threads = 24
 path = "noctrex/GLM-4.7-MXFP4_MOE-GGUF/GLM-4.7-MXFP4_MOE-00001-of-00012.gguf"
 
 # ============================================================

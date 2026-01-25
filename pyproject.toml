@@ -29,6 +29,7 @@ cc = "src.cli:run_claude_code"
 hfd = "src.cli:download_model"
 build = "src.cli:build"
 benchmark = "src.utils.benchmark:run_benchmark"
+optimize = "src.utils.optimize:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
