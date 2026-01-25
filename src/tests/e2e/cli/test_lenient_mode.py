@@ -7,7 +7,7 @@ import pytest
 import re
 import os
 from pathlib import Path
-from tests.conftest import LOGS_DIR
+from src.tests.conftest import LOGS_DIR
 
 
 class TestCliLenient:

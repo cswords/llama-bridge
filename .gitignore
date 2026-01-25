@@ -57,3 +57,4 @@ bindings/build/
 *.bak
 *.log
 scripts/hfd.sh
+.pytest_cache

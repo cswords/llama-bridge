@@ -16,6 +16,7 @@ CONFIGS = [
     "configs/mimo-v2.toml",
     "configs/minimax-m2.1.toml",
     "configs/glm4-reap.toml",
+    "configs/glm4-moe.toml",
     "configs/glm4-flash.toml",
     "configs/gpt-oss-120b.toml"
 ]
@@ -32,10 +33,29 @@ def wait_for_server(url, timeout=300):
         time.sleep(1)
     return False
 
-def run_benchmark():
+import sys
+import argparse
+
+def run_benchmark(target_config: str = None):
+    # If no target_config provided, check sys.argv for --config
+    if target_config is None:
+        parser = argparse.ArgumentParser(description="Llama-Bridge Benchmark Tool")
+        parser.add_argument("--config", type=str, help="Specific config name to run (e.g., glm4-moe)")
+        # We use parse_known_args to avoid crashing on unknown uv/entrypoint garbage if any
+        args, _ = parser.parse_known_args()
+        target_config = args.config
+
     results = []
     
-    for config_path in CONFIGS:
+    configs_to_run = CONFIGS
+    if target_config:
+        if target_config in CONFIGS or Path(target_config).exists():
+            configs_to_run = [target_config]
+        else:
+            print(f"Error: Config '{target_config}' not found.")
+            return
+
+    for config_path in configs_to_run:
         if not Path(config_path).exists():
             print(f"Skipping {config_path} (not found)")
             continue
@@ -151,6 +171,10 @@ def run_benchmark():
     print("="*80)
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Llama-Bridge Benchmark Tool")
+    parser.add_argument("--config", type=str, help="Specific config name to run (e.g., glm4-moe)")
+    args = parser.parse_args()
+
     # Ensure we don't have a port conflict
     os.system("lsof -ti:8000 | xargs kill -9 2>/dev/null")
-    run_benchmark()
+    run_benchmark(args.config)
