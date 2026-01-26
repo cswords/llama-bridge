@@ -5,6 +5,12 @@
 # Model Definition
 # ============================================================
 [models.glm4flash]
+n_ubatch = 512
+n_batch = 512
+cache_type_v = 'f16'
+cache_type_k = 'f16'
+flash_attn = false
+n_threads = 4
 path = "models/ggml-org/GLM-4.7-Flash-GGUF/GLM-4.7-Flash-Q4_K.gguf"
 
 # ============================================================

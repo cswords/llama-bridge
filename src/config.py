@@ -29,6 +29,12 @@ class ModelConfig:
     """Configuration for a loaded model."""
     name: str
     path: str
+    n_threads: int = 0
+    n_batch: int = 0
+    n_ubatch: int = 0
+    flash_attn: bool = False
+    cache_type_k: str = "f16"
+    cache_type_v: str = "f16"
     # n_ctx_train is read from model metadata at load time
 
 
@@ -38,6 +44,8 @@ class CacheConfig:
     name: str
     model: str  # Reference to model name
     n_ctx: int = 0  # 0 = use model's n_ctx_train
+    cache_type_k: str | None = None  # None = use model's default
+    cache_type_v: str | None = None  # None = use model's default
     description: str = ""
 
 
@@ -128,11 +136,16 @@ def parse_config(raw: dict[str, Any], source: str = "<dict>") -> BridgeConfig:
         if not isinstance(model_data, dict):
             raise ConfigurationError(f"Invalid model definition for '{name}' in {source}")
         
-        path = model_data.get("path")
-        if not path:
-            raise ConfigurationError(f"Model '{name}' missing 'path' in {source}")
-        
-        config.models[name] = ModelConfig(name=name, path=path)
+        config.models[name] = ModelConfig(
+            name=name, 
+            path=path,
+            n_threads=model_data.get("n_threads", 0),
+            n_batch=model_data.get("n_batch", 0),
+            n_ubatch=model_data.get("n_ubatch", 0),
+            flash_attn=model_data.get("flash_attn", False),
+            cache_type_k=model_data.get("cache_type_k", "f16"),
+            cache_type_v=model_data.get("cache_type_v", "f16")
+        )
     
     # Parse caches
     caches_raw = raw.get("caches", {})
@@ -156,6 +169,8 @@ def parse_config(raw: dict[str, Any], source: str = "<dict>") -> BridgeConfig:
             name=name,
             model=model_ref,
             n_ctx=cache_data.get("n_ctx", 0),
+            cache_type_k=cache_data.get("cache_type_k"),
+            cache_type_v=cache_data.get("cache_type_v"),
             description=cache_data.get("description", ""),
         )
     

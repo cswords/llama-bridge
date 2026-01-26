@@ -427,10 +427,12 @@ def main():
                 debug=args.debug,
                 mock=False,
                 n_ctx=n_ctx,
-                n_batch=args.n_batch,
-                n_ubatch=args.n_ubatch,
-                n_threads=args.n_threads,
-                flash_attn=args.flash_attn,
+                n_batch=model_config.n_batch or args.n_batch,
+                n_ubatch=model_config.n_ubatch or args.n_ubatch,
+                n_threads=model_config.n_threads or args.n_threads,
+                flash_attn=model_config.flash_attn or args.flash_attn,
+                cache_type_k=primary_cache.cache_type_k or model_config.cache_type_k if primary_cache else model_config.cache_type_k,
+                cache_type_v=primary_cache.cache_type_v or model_config.cache_type_v if primary_cache else model_config.cache_type_v,
                 # Pass cache configs for multi-context support
                 cache_configs=[
                     {"name": c.name, "n_ctx": c.n_ctx}

@@ -52,6 +52,7 @@ class BridgeBase:
     def __init__(self, model_path: str, debug: bool = False, mock: bool = False, 
                  n_ctx: int = 0, n_batch: int = 0, n_ubatch: int = 0, 
                  n_threads: int = 0, flash_attn: bool = False,
+                 cache_type_k: str = "f16", cache_type_v: str = "f16",
                  cache_configs: list | None = None):
         """Initialize the BridgeBase."""
         self.model_path = model_path
@@ -62,6 +63,8 @@ class BridgeBase:
         self.n_ubatch = n_ubatch
         self.n_threads = n_threads
         self.flash_attn = flash_attn
+        self.cache_type_k = cache_type_k
+        self.cache_type_v = cache_type_v
         self.cache_configs = cache_configs or []
         
         self.wrapper = None
@@ -80,7 +83,8 @@ class BridgeBase:
             except ImportError:
                 from src import llama_chat
             self.wrapper = llama_chat.LlamaChatWrapper(
-                model_path, n_ctx, n_batch, n_ubatch, n_threads, flash_attn
+                model_path, n_ctx, n_batch, n_ubatch, n_threads, flash_attn,
+                cache_type_k, cache_type_v
             )
             
             # Create additional contexts if configured

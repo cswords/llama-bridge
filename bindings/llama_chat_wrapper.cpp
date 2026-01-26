@@ -27,6 +27,22 @@
 
 namespace py = pybind11;
 
+static ggml_type kv_cache_type_from_str(const std::string &s) {
+  if (s == "f16")
+    return GGML_TYPE_F16;
+  if (s == "q8_0")
+    return GGML_TYPE_Q8_0;
+  if (s == "q4_0")
+    return GGML_TYPE_Q4_0;
+  if (s == "q4_1")
+    return GGML_TYPE_Q4_1;
+  if (s == "q5_0")
+    return GGML_TYPE_Q5_0;
+  if (s == "q5_1")
+    return GGML_TYPE_Q5_1;
+  return GGML_TYPE_F16;
+}
+
 /**
  * State for a single context (cache).
  * Each context has its own KV cache and token history.
@@ -48,9 +64,11 @@ class LlamaChatWrapper {
 public:
   LlamaChatWrapper(const std::string &model_path, int32_t n_ctx,
                    int32_t n_batch, int32_t n_ubatch, int32_t n_threads,
-                   bool flash_attn)
+                   bool flash_attn, const std::string &cache_type_k = "f16",
+                   const std::string &cache_type_v = "f16")
       : model_path_(model_path), n_ctx_default_(n_ctx), n_batch_(n_batch),
-        n_ubatch_(n_ubatch), n_threads_(n_threads), flash_attn_(flash_attn) {
+        n_ubatch_(n_ubatch), n_threads_(n_threads), flash_attn_(flash_attn),
+        cache_type_k_(cache_type_k), cache_type_v_(cache_type_v) {
     // Initialize llama backend
     llama_backend_init();
 
@@ -140,6 +158,8 @@ public:
                                              : LLAMA_FLASH_ATTN_TYPE_DISABLED;
     ctx_params.n_threads = (n_threads_ > 0) ? n_threads_ : 8;
     ctx_params.n_threads_batch = (n_threads_ > 0) ? n_threads_ : 8;
+    ctx_params.type_k = kv_cache_type_from_str(cache_type_k_);
+    ctx_params.type_v = kv_cache_type_from_str(cache_type_v_);
     ctx_params.n_seq_max = 1; // Single sequence per context
 
     llama_context *ctx = llama_init_from_model(model_, ctx_params);
@@ -493,6 +513,8 @@ private:
   int32_t n_ubatch_;
   int32_t n_threads_;
   bool flash_attn_;
+  std::string cache_type_k_;
+  std::string cache_type_v_;
 
   // Multi-context support
   std::unordered_map<std::string, ContextState> contexts_;
@@ -502,10 +524,11 @@ PYBIND11_MODULE(llama_chat, m) {
   m.doc() = "Llama.cpp chat bindings for Python";
   py::class_<LlamaChatWrapper>(m, "LlamaChatWrapper")
       .def(py::init<const std::string &, int32_t, int32_t, int32_t, int32_t,
-                    bool>(),
+                    bool, const std::string &, const std::string &>(),
            py::arg("model_path"), py::arg("n_ctx") = 0, py::arg("n_batch") = 0,
            py::arg("n_ubatch") = 0, py::arg("n_threads") = 0,
-           py::arg("flash_attn") = false)
+           py::arg("flash_attn") = false, py::arg("cache_type_k") = "f16",
+           py::arg("cache_type_v") = "f16")
       .def("create_context", &LlamaChatWrapper::create_context, py::arg("name"),
            py::arg("n_ctx") = 0)
       .def("list_contexts", &LlamaChatWrapper::list_contexts)
