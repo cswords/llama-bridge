@@ -14,7 +14,6 @@ def find_llama_bench():
     """Find llama-bench executable."""
     paths = [
         "./vendor/llama.cpp/build/bin/llama-bench",
-        "/opt/homebrew/bin/llama-bench",
         "llama-bench"
     ]
     for p in paths:
@@ -128,15 +127,11 @@ def main():
         "-b", "512", "-ub", "512"
     ]))
     
-    if res_p2:
-        best_p2 = max(res_p2, key=get_tps)
-        best_ctk = best_p2.get("type_k")
-        best_ctv = best_p2.get("type_v")
-        print(f"Best KV Cache: K={best_ctk}, V={best_ctv} ({get_tps(best_p2):.2f} t/s PP)")
-    else:
-        print("Phase 2 failed (KV quantization might not be supported for this model). Falling back to f16.")
-        best_ctk = "f16"
-        best_ctv = "f16"
+    if not res_p2: sys.exit(1)
+    best_p2 = max(res_p2, key=get_tps)
+    best_ctk = best_p2.get("type_k")
+    best_ctv = best_p2.get("type_v")
+    print(f"Best KV Cache: K={best_ctk}, V={best_ctv} ({get_tps(best_p2):.2f} t/s PP)")
 
     # Phase 3: Batch & UBatch Optimization
     print("\n>>> Phase 3: Optimizing Batch/UBatch...")
@@ -149,17 +144,13 @@ def main():
         "-b", batches, "-ub", ubatches
     ]))
     
-    if res_p3:
-        # Filter valid pairs
-        valid_p3 = [r for r in res_p3 if r.get("n_ubatch") <= r.get("n_batch")]
-        best_p3 = max(valid_p3, key=get_tps)
-        best_batch = best_p3.get("n_batch")
-        best_ubatch = best_p3.get("n_ubatch")
-        print(f"Best Batch: {best_batch}, UBatch: {best_ubatch} ({get_tps(best_p3):.2f} t/s PP)")
-    else:
-        print("Phase 3 failed. Falling back to default batch settings.")
-        best_batch = 512
-        best_ubatch = 512
+    if not res_p3: sys.exit(1)
+    # Filter valid pairs
+    valid_p3 = [r for r in res_p3 if r.get("n_ubatch") <= r.get("n_batch")]
+    best_p3 = max(valid_p3, key=get_tps)
+    best_batch = best_p3.get("n_batch")
+    best_ubatch = best_p3.get("n_ubatch")
+    print(f"Best Batch: {best_batch}, UBatch: {best_ubatch} ({get_tps(best_p3):.2f} t/s PP)")
 
     # Summary
     print("\n" + "="*40)
