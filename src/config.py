@@ -136,6 +136,10 @@ def parse_config(raw: dict[str, Any], source: str = "<dict>") -> BridgeConfig:
         if not isinstance(model_data, dict):
             raise ConfigurationError(f"Invalid model definition for '{name}' in {source}")
         
+        path = model_data.get("path")
+        if not path:
+            raise ConfigurationError(f"Model '{name}' missing 'path' in {source}")
+            
         config.models[name] = ModelConfig(
             name=name, 
             path=path,

@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "GGUF Model Inference with Universal API Support"
 readme = "README.md"
 license = {text = "GPL-3.0-only"}
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.109.0",
     "uvicorn[standard]>=0.27.0",
@@ -30,6 +30,7 @@ hfd = "src.cli:download_model"
 build = "src.cli:build"
 benchmark = "src.utils.benchmark:run_benchmark"
 optimize = "src.utils.optimize:main"
+terminal-bench = "src.utils.evaluate:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -52,3 +53,8 @@ target-version = ["py311"]
 asyncio_mode = "auto"
 testpaths = ["src/tests"]
 python_files = ["test_*.py"]
+
+[dependency-groups]
+dev = [
+    "terminal-bench>=0.2.18",
+]
