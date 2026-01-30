@@ -10,7 +10,7 @@ def mock_logger():
 
 @pytest.fixture
 def bridge(mock_logger):
-    with patch("src.bridge.logger", mock_logger):
+    with patch("src.bridge.base.logger", mock_logger):
         bridge = Bridge(
             model_path="dummy.gguf", 
             mock=True,

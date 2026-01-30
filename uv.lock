@@ -1208,6 +1208,10 @@ dev = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "httpx" },
+    { name = "pexpect" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
     { name = "terminal-bench" },
 ]
 
@@ -1228,7 +1232,13 @@ requires-dist = [
 provides-extras = ["dev"]
 
 [package.metadata.requires-dev]
-dev = [{ name = "terminal-bench", specifier = ">=0.2.18" }]
+dev = [
+    { name = "httpx", specifier = ">=0.28.1" },
+    { name = "pexpect", specifier = ">=4.9.0" },
+    { name = "pytest", specifier = ">=9.0.2" },
+    { name = "pytest-asyncio", specifier = ">=1.3.0" },
+    { name = "terminal-bench", specifier = ">=0.2.18" },
+]
 
 [[package]]
 name = "markdown-it-py"

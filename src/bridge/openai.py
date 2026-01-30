@@ -18,6 +18,8 @@ class OpenAIMixin:
     async def complete_openai(self, request: dict, cache_name: str | None = None) -> str:
         """Handle non-streaming OpenAI request."""
         log_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        if cache_name:
+            log_id += f"_{cache_name}"
         self._log_request("req_client_raw", request, log_id)
         
         internal_req = self.openai_adapter.to_internal(request)
@@ -35,6 +37,8 @@ class OpenAIMixin:
     async def stream_openai(self, request: dict, cache_name: str | None = None) -> AsyncGenerator[str, None]:
         """Handle streaming OpenAI request."""
         log_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        if cache_name:
+            log_id += f"_{cache_name}"
         self._log_request("req_client_raw", request, log_id)
         
         internal_req = self.openai_adapter.to_internal(request)

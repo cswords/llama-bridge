@@ -3,7 +3,7 @@ import pytest
 from src.bridge.scanner import StreamScanner, ScanEvent
 
 def test_scanner_basic_content():
-    scanner = StreamScanner(protected_tags=["<thought>", "</thought>"])
+    scanner = StreamScanner(block_tokens=["<thought>", "</thought>"])
     events = scanner.push("Hello world")
     # Buffer might hold "H" if matches "<", but "H" doesn't. 
     # Actually it should flush "Hello world" immediately since no prefix matches.
@@ -12,7 +12,7 @@ def test_scanner_basic_content():
     assert events[0].data == "Hello world"
 
 def test_scanner_with_partial_tag():
-    scanner = StreamScanner(protected_tags=["<thought>", "</thought>"])
+    scanner = StreamScanner(block_tokens=["<thought>", "</thought>"])
     # Push "<tho" -> should be buffered
     events = scanner.push("<tho")
     assert len(events) == 0
@@ -26,7 +26,7 @@ def test_scanner_with_partial_tag():
     assert scanner.buffer == ""
 
 def test_scanner_false_positive():
-    scanner = StreamScanner(protected_tags=["<thought>", "</thought>"])
+    scanner = StreamScanner(block_tokens=["<thought>", "</thought>"])
     # Push "<th" (prefix)
     scanner.push("<th")
     assert len(scanner.buffer) == 3
@@ -40,7 +40,7 @@ def test_scanner_false_positive():
     assert scanner.buffer == ""
 
 def test_scanner_embedded_tags():
-    scanner = StreamScanner(protected_tags=["<thought>", "</thought>"])
+    scanner = StreamScanner(block_tokens=["<thought>", "</thought>"])
     raw_text = "Analysis: <thought>Working on it...</thought> Done."
     
     accumulated_content = ""
@@ -70,7 +70,7 @@ def test_scanner_embedded_tags():
 def test_scanner_qwen_tools():
     # Simulate Qwen tool call pattern
     tags = ["<function=", "</function>", "<parameter=", "</parameter>"]
-    scanner = StreamScanner(protected_tags=tags)
+    scanner = StreamScanner(block_tokens=tags)
     
     raw = "I will call a tool: <function=get_weather><parameter=city>Beijing</parameter></function>"
     
@@ -96,7 +96,7 @@ def test_preventative_buffering_parity():
     """
     raw_output = "Sure! <thought>I should check the time.</thought> The time is 10:30."
     tags = ["<thought>", "</thought>"]
-    scanner = StreamScanner(protected_tags=tags)
+    scanner = StreamScanner(block_tokens=tags)
     
     # Expected results (what a full parser would give)
     # Note: common_chat_parse would return structured content

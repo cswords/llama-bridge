@@ -205,7 +205,9 @@ uv run build
 Llama-Bridge 采用高度解耦的流水线架构，确保了即使在处理复杂的模型（如自带 XML 标签的 MiniMax 或 Qwen）时，仍能提供极致的流式体验：
 
 1.  **Core (C++)**: `llama.cpp` 及其 Python 绑定。负责高性能张量计算、KV 缓存管理和基础 Token 采样。
-2.  **Framer (Scanner)**: 通用块分帧器。实时扫描字节流，利用状态机将原始文本与结构化块（如 `<thought>`, `<tool_call>`）进行物理隔离，支持实时泵出正文。
+2.  **Framer (Scanner)**: 通用块分帧器。实时扫描字节流，利用状态机将原始文本与结构化块（如 `<thought>`, `<tool_call>`）进行物理隔离。
+    *   **Prefix Lookahead**: 采用前瞻缓冲机制，彻底解决了流式输出中的“贪婪匹配”问题（即防止 `<|start|>` 抢占 `<|start|>assistant`）。
+    *   **Stateful & Stateless**: 区分 Block Tokens (有状态，触发缓冲) 和 Skip Tokens (无状态，直接丢弃)，确保协议控制符不泄露给用户。
 3.  **Interpreter (Flavor)**: 语义解释器。针对不同模型风味（Qwen, MiniMax, Llama 等）定义解释逻辑：
     *   **块解析**：将隔离出的块内容翻译为 API 标准格式（如从 XML 提取 Tool Calls）。
     *   **流处理**：决定哪些块片段（Chunks）需要实时转发（如思考过程），哪些需要静默累加。
@@ -239,6 +241,7 @@ Typical end-to-end latency with Claude Code (including CLI overhead):
 > - **CC Cold (E2E)**: 时间包含了从执行 `uv run cc -p "..."` 到输出结果的全流程，涵盖了 CLI 启动、网络通信、模型推理及输出（包含模型权重动态加载/预热开销）。
 > - **CC Hot (KV Cache)**: 代表缓存就绪后的后续请求（使用 Claude Code）。
 > - **Raw API (Direct)**: 不经过 Claude Code CLI，直接通过 HTTP 请求服务器的延迟（简单 Prompt，无大量 System Prompt 开销）。
+> - **TPS Measurement**: 速度测试采用 "Manual TPS" 方法，通过生成固定 100 词的故事 (`Write a 100 word story...`) 并剔除固定延迟后计算得出。
 > - **Active Params**: 对于 MoE (Mixture of Experts) 模型，仅列出推理时激活的参数量。对于 Dense 模型，此数值等于 Total Params。
 
 ---

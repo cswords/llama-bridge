@@ -6,7 +6,7 @@ from src.bridge.flavors import QwenFlavor, MiniMaxFlavor
 
 def test_scanner_qwen_tool_call():
     flavor = QwenFlavor()
-    scanner = StreamScanner(protected_tags=flavor.protected_tags)
+    scanner = StreamScanner(block_tokens=flavor.block_tokens)
     
     raw = "I will call a tool: <function=get_weather><parameter=city>Beijing</parameter></function> That's it."
     
@@ -31,7 +31,7 @@ def test_scanner_qwen_tool_call():
 
 def test_scanner_minimax_tool_call():
     flavor = MiniMaxFlavor()
-    scanner = StreamScanner(protected_tags=flavor.protected_tags)
+    scanner = StreamScanner(block_tokens=flavor.block_tokens)
     
     raw = 'Sure. <invoke name="get_weather"><parameter name="city">Shanghai</parameter></invoke> Done.'
     
@@ -47,7 +47,7 @@ def test_scanner_minimax_tool_call():
 
 def test_scanner_fragmented_tag():
     # Test that it buffers partial tags correctly
-    scanner = StreamScanner(protected_tags=["<thought>", "</thought>"])
+    scanner = StreamScanner(block_tokens=["<thought>", "</thought>"])
     
     # Push "<tho" -> should be buffered
     ev1 = scanner.push("<tho")
@@ -73,7 +73,7 @@ def test_scanner_fragmented_tag():
     assert ev5[0].type == "block_end"
 
 def test_scanner_false_alarm():
-    scanner = StreamScanner(protected_tags=["<thought>"])
+    scanner = StreamScanner(block_tokens=["<thought>"])
     
     # "<tho" is prefix
     assert len(scanner.push("<tho")) == 0
@@ -95,27 +95,27 @@ def test_scanner_false_alarm():
 def test_flavor_parsing(flavor_class, raw_output, expected_tools):
     flavor = flavor_class()
     # Mock the full cycle
-    scanner = StreamScanner(protected_tags=flavor.protected_tags)
+    scanner = StreamScanner(block_tokens=flavor.block_tokens)
     events = scanner.push(raw_output) + scanner.flush()
     
     # Capture block content with stack to support nesting
-    stack = [] # List of [tag, content]
+    stack = [] # List of [tag, content, start_tag_data]
     tool_calls = []
     
     for ev in events:
         if ev.type == "block_start":
             for item in stack:
                 item[1] += ev.data
-            stack.append([ev.tag, ""])
+            stack.append([ev.tag, "", ev.data])
         elif ev.type == "block_content":
             for item in stack:
                 item[1] += ev.data
         elif ev.type == "block_end":
             if stack:
-                tag, content = stack.pop()
+                tag, content, start_tag_data = stack.pop()
                 for item in stack:
                     item[1] += ev.data
-                res = flavor.interpret_block_complete(tag, content)
+                res = flavor.interpret_block_complete(tag, content, start_tag=start_tag_data)
                 if res and res[0] == "tool_use":
                     tool_calls.extend(res[1])
             
@@ -126,7 +126,7 @@ def test_flavor_parsing(flavor_class, raw_output, expected_tools):
         assert json.loads(at["arguments"]) == json.loads(et["arguments"])
 
 def test_bridge_replication():
-    scanner = StreamScanner(protected_tags=["<thought>", "</thought>"])
+    scanner = StreamScanner(block_tokens=["<thought>", "</thought>"])
     tokens = ["Hello ", "<", "thou", "ght>", " I am thinking.", "</", "thought>", " Done."]
     events = []
     for t in tokens:
@@ -138,6 +138,47 @@ def test_bridge_replication():
     
     thought_content = "".join([e.data for e in events if e.type == "block_content"])
     assert thought_content == " I am thinking."
+
+
+def test_scanner_harmony_header_with_constrain():
+    # Test specific regression: <|constrain|> in header should NOT act as a block starter
+    flavor = MiniMaxFlavor()
+    scanner = StreamScanner(block_tokens=flavor.block_tokens, skip_tokens=flavor.skip_tokens, end_tokens=flavor.end_tokens)
+    
+    # Raw output from GPT-OSS-120B (simulated)
+    # Note: <|start|>assistant is skipped.
+    raw = "<|start|>assistant Llama<|channel|>commentary to=functions.Read<|constrain|>json<|message|>{\"file\": \"README.md\"}<|end|>"
+    
+    events = []
+    for char in raw:
+        events.extend(scanner.push(char))
+    events.extend(scanner.flush())
+    
+    # Analysis:
+    # 1. <|start|>assistant -> Skipped (if defined in skip_tokens)
+    # 2. Llama -> Content (oops, leaky prefix? But Scanner treats it as content)
+    # 3. <|channel|> -> Block Start
+    # 4. commentary to=... <|constrain|> json ... -> Block Content (should NOT start new block)
+    # 5. <|message|> -> In Harmony, is this a separator? 
+    # Wrapper/Protocol logic handles splitting. Scanner sees it as content inside <|channel|> block?
+    # Wait, in protocols.py: block_tokens include <|channel|>, <|end|>.
+    # <|message|> is NOT a block token. It is content inside the block.
+    # 6. <|end|> -> Block End.
+    
+    # Check block events
+    blocks = [e for e in events if e.type == "block_start"]
+    assert len(blocks) == 1
+    assert blocks[0].data == "<|channel|>"
+    
+    # Check that <|constrain|> did NOT trigger block_start
+    assert not any(e.data == "<|constrain|>" and e.type == "block_start" for e in events)
+    
+    # The content of the block should contain the full header+body
+    block_content = "".join([e.data for e in events if e.type == "block_content"])
+    assert "commentary" in block_content
+    assert "<|constrain|>" in block_content # It stays as content!
+    assert "json" in block_content
+    assert "README.md" in block_content
 
 if __name__ == "__main__":
     pytest.main([__file__, "-s"])

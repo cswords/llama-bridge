@@ -18,6 +18,8 @@ class AnthropicMixin:
     async def complete_anthropic(self, request: dict, cache_name: str | None = None) -> str:
         """Handle non-streaming Anthropic request."""
         log_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        if cache_name:
+            log_id += f"_{cache_name}"
         self._log_request("req_client_raw", request, log_id)
         
         internal_req = self.anthropic_adapter.to_internal(request)
@@ -36,6 +38,8 @@ class AnthropicMixin:
     async def stream_anthropic(self, request: dict, cache_name: str | None = None) -> AsyncGenerator[str, None]:
         """Handle streaming Anthropic request."""
         log_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        if cache_name:
+            log_id += f"_{cache_name}"
         self._log_request("req_client_raw", request, log_id)
         
         internal_req = self.anthropic_adapter.to_internal(request)

@@ -8,7 +8,7 @@ from src.bridge.flavors import BaseFlavor
 # 1. Custom Flavor to define what is "protected"
 class MockThinkingFlavor(BaseFlavor):
     @property
-    def protected_tags(self):
+    def block_tokens(self):
         return ["<think>", "</think>"]
 
     def interpret_block_chunk(self, tag, content):

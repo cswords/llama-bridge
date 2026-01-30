@@ -138,10 +138,8 @@ async def anthropic_messages(request: Request) -> Response:
         except ContextLimitExceededError as e:
             raise e
         except Exception as e:
-            if config and not config.debug:
-                logger.error(f"Error initializing stream: {e}")
-            else:
-                logger.exception(f"Error initializing stream: {e}")
+            # ALWAYS log full exception trace for 500 errors in this critical path
+            logger.exception(f"Error initializing stream: {e}")
             return JSONResponse(
                 status_code=500,
                 content={"error": {"message": str(e), "type": "server_error"}}

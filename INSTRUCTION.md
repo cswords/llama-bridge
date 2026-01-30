@@ -218,5 +218,110 @@ except openai.BadRequestError as e:
 * **变更流程**：先写测试 -> 运行失败 -> 修改代码 -> 测试通过。
 * **回归测试**：确保所有 `tests/unit` 和 `tests/integration` 下的测试（特别是 `test_overflow_handling.py` 和 `test_structured_content.py`）持续通过。
 
+
 ### 6.3 4-File 日志规则
 在 `--debug` 模式下，主要请求/响应数据会被记录，用于调试协议转换问题。
+
+---
+
+## Appendix A: 协议规范 (Protocol Specifications)
+
+### A.1 OpenAI Harmony / MiniMax 协议
+
+**参考资料 (References):**
+- [OpenAI Harmony Cookbook](https://developers.openai.com/cookbook/articles/openai-harmony)
+- [Unsloth Chat Templates](https://unsloth.ai/docs/basics/chat-templates)
+- [llama.cpp Supported Templates](https://github.com/ggml-org/llama.cpp/wiki/Templates-supported-by-llama_chat_apply_template)
+
+**消息结构 (Structure):**
+```
+<|start|>{header}<|message|>{content}<|end|>
+```
+
+**核心组件 (Key Components):**
+- **角色 (Roles)**: `system`, `user`, `assistant`, `developer`, `functions.{name}`
+- **频道 (Channels/Headers)**: `final` (文本), `analysis` (推理), `commentary` (工具调用).
+- **分隔符 (Delimiters)**: `<|message|>` (头体分隔), `<|channel|>` (类型分隔).
+- **停止符 (Stop Tokens)**: `<|end|>`, `<|return|>` (生成结束), `<|call|>` (工具调用结束).
+
+**工具调用 (模型输出):**
+```
+<|start|>assistant<|channel|>commentary to=functions.{name} <|constrain|>json<|message|>{JSON_ARGS}<|call|>
+```
+*注意：`<|constrain|>` Token 属于头部信息，**不是** Block 分隔符。*
+
+**工具结果 (模型输入):**
+```
+<|start|>functions.{name} to=assistant<|channel|>commentary<|message|>{JSON_RESULT}<|end|>
+```
+
+### A.2 模板解析策略与单一事实来源 (Template Resolution Strategy & Source of Truth)
+
+为了确保使用的控制 Token 与模型量化时完全一致，我们主要依赖 `llama.cpp` 内部的模板应用逻辑，它会直接读取嵌入在 GGUF 模型元数据中的聊天模板定义。
+
+**回退/验证流程 (Fallback/Verification Workflow):**
+如果 GGUF 模型缺少元数据或表现异常，请按以下步骤操作：
+1.  **检查原始模型**: 在 HuggingFace 上定位未量化的源模型。
+2.  **检查配置文件**: 下载源模型的 `tokenizer_config.json` 或 `chat_template.json`。
+3.  **参考官方定义**: 对照官方文档（如 OpenAI Harmony 文档、Unsloth 维基）。
+4.  **最终验证**: 仅将这些外部来源作为*参考*来验证 `llama.cpp` 的行为，或在自动检测失败时用于构建手动模板。
+
+**核心原则**: `llama.cpp` 是最终的执行引擎；它对 GGUF Header 的解读是 Token 化和模板应用的最高事实来源。
+
+### A.3 流式策略：智能缓冲与守门人逻辑 (Smart Buffering & Gatekeeper Logic)
+
+为了解决 **协议安全性**（防止原始协议文本泄露）与 **用户体验**（最小化首字延迟 Time-To-First-Token）之间的固有冲突，Llama-Bridge 采用了一套基于以下哲学的 **混合缓冲/流式 (Hybrid Buffering/Streaming)** 策略：
+
+**1. Block 容器原则 (The Block Container Principle)**
+*   **真正的 Block Starter**：只有那些定义了完整、有效容器的 Token 才是 Block Starter。
+    *   **Harmony**: `<|start|>` (开启一个以 `<|end|>` 结尾的完整 Message 容器)。
+    *   **XML**: 标准标签如 `<thinking>`, `<tool_code>` (以 `</...>` 结尾)。
+*   **分隔符不是 Block**：诸如 `<|channel|>`, `<|message|>` 或 `<|constrain|>` 等 Token 仅仅是 Block 内部的分隔符。它们**不**触发独立的缓冲状态。
+
+**2. 守门人机制 (The Gatekeeper Mechanism)**
+*   **缓冲阶段 (Buffering Phase)**：一旦进入 Block（例如遇到 `<|start|>`），Scanner 即进入 `Buffering` 状态。在此阶段 **没有任何内容会被发送给用户**。这确保了不完整的或内部的 Header（如 `assistant<|channel|>commentary`）绝不会泄露。
+*   **开闸决策 (The Gate Decision)**：Scanner 监控缓冲区中的特定 "Gate" Token，这些 Token 标志着 Header 到 Body 的过渡。
+    *   **Harmony Gate**: `<|message|>`
+    *   **XML Gate**: 标签的闭合括号 `>`。
+*   **透传模式 (Pass-Through/Streaming Mode)**：如果 Header 表明内容是 **安全且可展示的**（例如 `final` channel 的文本，或 `analysis` channel 的推理），“闸门”打开。Scanner 立即 Flush 缓冲区，并实时流式传输所有后续字符。
+*   **拦截模式 (Hold/Parsing Mode)**：如果 Header 表明内容是 **机器可读的**（例如 `commentary` channel 的工具调用，或未知的元数据），“闸门”保持关闭。整个 Block 将被缓冲直到遇到结束 Token（`<|end|>`），然后被送往 Parser 进行结构化处理。
+
+**策略汇总表：**
+
+| 协议 (Protocol) | Block 类型 | Header 特征 | Gate Token | 动作 (Action) |
+| :--- | :--- | :--- | :--- | :--- |
+| **Harmony** | **文本 (Text)** | `<|channel|>final` | `<|message|>` | **流式 (Stream)** |
+| **Harmony** | **推理 (Reasoning)** | `<|channel|>analysis` | `<|message|>` | **流式 (Stream)** (如开启) |
+| **Harmony** | **工具调用 (Tool Call)** | `<|channel|>commentary` | `<|message|>` | **缓冲 (Buffer)** (等待解析) |
+| **XML** | **文本 (Text)** | (无 Tag / `<text>`) | N/A | **流式 (Stream)** |
+| **XML** | **思考 (Thinking)** | `<thinking>` | `>` | **流式 (Stream)** (如开启) |
+| **XML** | **工具代码 (Tool Code)** | `<tool_code>` | `>` | **缓冲 (Buffer)** (等待解析) |
+
+这一统一逻辑确保了：
+1.  **零泄露**：用户永远不会看到原始协议头或不完整的工具调用。
+2.  **低延迟**：普通的文本回复一旦 Header 校验通过，立即开始流式输出。
+3.  **鲁棒性**：复杂的多行工具调用在触发任何事件前，都会被被完整捕获并验证。
+
+**3. 隐式 Block 注入 (Implicit Block Injection)**
+
+为了统一处理结构化协议（Harmony/XML）与普通文本输出（如 ChatML, Llama-2），Scanner 引入了“隐式 Block”机制：
+*   **触发条件**：当 Scanner 遇到如果不属于 Skip Token 且不是显式 Block Starter 的普通文本时。
+*   **动作**：Scanner 自动进入一个虚拟的 **Content Block**（可以视为 `<|implicit|>`）。
+*   **属性**：该 Block 默认被标记为 **Safe & Displayable**，立即进入 **透传模式 (Streaming)**。
+*   **意义**：这一机制消除了 Scanner 中“游离在 Block 之外的 Raw Text”状态。所有的输出字符，要么被明确丢弃（Skip），要么被封装在某个 Block 中受控，从而实现了逻辑的完全闭环和统一。
+
+### A.4 上下文感知的 EOS 处理 (Context-Aware EOS Handling)
+
+Scanner 在处理 End-Of-String (EOS) 信号时，必须根据当前的生命周期阶段采取截然不同的策略，以区分 **Prefill (预填充)** 和 **Generation (生成)**：
+
+**1. Input Phase (Prefill Check)**
+*   **语义**：在此阶段，EOS 仅代表用户输入的结束，是模型生成的**起点**。它意味着“接力棒的交接”，而非任务的完结。
+*   **动作**：Scanner **绝对禁止** 自动关闭未闭合的 Block（如 `<|start|>assistant`）。
+*   **状态保留**：若 Scanner 在 Input 结束时处于 `Block Open` 状态，则判定为 **存在 Prefill**。该状态必须被完整保留并传递给生成循环，确保模型生成的第一个字符能够无缝接入该 Block。
+
+**2. Output Phase (Generation Flush)**
+*   **语义**：在此阶段，EOS 代表模型停止生成（或连接断开）。它意味着“承诺必须兑现”。
+*   **动作**：Scanner **必须强制关闭** 所有未闭合的 Block，并尝试进行 Interpret（解析）。
+*   **容错**：即使缺少显式的 `<|end|>` 或 `</tag>`，Scanner 也应假设 Block 已结束，并尽最大努力提取已缓冲的内容（如完整的 JSON），避免因截断导致的数据丢失。
+
+**核心原则**：**Input EOS != Close Block**，只有 **Output EOS** 才是强制结算点。

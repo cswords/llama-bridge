@@ -375,7 +375,7 @@ class BridgeBase:
         # Emergency Fallback: If C++ didn't find tools but Flavor knows the model is 'quirky'
         if not tool_calls:
             from .scanner import StreamScanner
-            scanner = StreamScanner(protected_tags=self.flavor.protected_tags)
+            scanner = StreamScanner(block_tokens=self.flavor.block_tokens)
             events = scanner.push(raw_response) + scanner.flush()
             
             curr_block = None
@@ -383,6 +383,7 @@ class BridgeBase:
             for ev in events:
                 if ev.type == "block_start":
                     curr_block = ev.tag.strip("<>").replace("/", "").split("=")[0]
+                    curr_start_tag = ev.data
                     curr_block_content = ""
                 elif ev.type == "block_content":
                     if curr_block:
@@ -395,10 +396,11 @@ class BridgeBase:
                         pass
                 elif ev.type == "block_end":
                     if curr_block:
-                        interpretation = self.flavor.interpret_block_complete(curr_block, curr_block_content)
+                        interpretation = self.flavor.interpret_block_complete(curr_block, curr_block_content, start_tag=curr_start_tag)
                         if interpretation and interpretation[0] == "tool_use":
                             tool_calls.extend(interpretation[1])
                     curr_block = None
+                    curr_start_tag = None
                     curr_block_content = ""
             
             # If after all that we still have no content AND no tools, reconstruct content from events
@@ -541,79 +543,80 @@ class BridgeBase:
             logger.info(f"[{ctx_to_use}] Prefill complete in {t2 - t0:.1f}s. Generating...")
             
             # 3. Stream loop
-            full_raw = ""
-            scanner = StreamScanner(protected_tags=self.flavor.protected_tags)
+            # Initialize scanner with flavor-specific tags
+            # CRITICAL FIX: Use local variable 'scanner' instead of 'self.scanner' 
+            # to prevent state corruption when multiple requests run concurrently.
+            scanner = StreamScanner(
+                block_tokens=self.flavor.block_tokens,
+                skip_tokens=self.flavor.skip_tokens,
+                end_tokens=self.flavor.end_tokens
+            )
             
-            # --- PREFILL STATE SYNCHRONIZATION ---
-            # Use prefill to synchronize scanner state (e.g. if we are already inside a <think> block)
-            
+            # Start tracking blocks. Stack of [tag_type, content_buffer, executed_flag, start_token, transparent_mode_event_type]
+            # transparent_mode_event_type: "content" or "reasoning_content" if we are in a transparent block
             block_content_stack = [] # List of [tag_type, content]
             prefill_source = None
             
-            # 1. Try explicit Assistant content from messages (User provided prefill)
-            last_msg = internal_req.get("messages", [])[-1] if internal_req.get("messages") else None
-            if last_msg and last_msg.get("role") == "assistant" and last_msg.get("content"):
-                prefill_source = last_msg["content"]
+            # 1. (Valid Prefill Check Removed) 
+            # We previously checked 'messsages[-1]' content, but that extracts raw text, 
+            # causing the Scanner to miss the critical Block Start Tokens (e.g. <|start|>assistant).
+            # We must rely on the Prompt Suffix Check (below) to capture the actual Control Tokens.
             
             # 2. If no explicit prefill, check Prompt tail for Implicit Prefill
-            # Algorithm: Find the LAST occurrence of any Block Start Tag.
-            # If it exists, and is NOT followed by its matching Close Tag, then it is an Open Block.
+            # Algorithm: Find the LAST occurrence of any Block Start Token.
+            # If it exists, and is NOT followed by a Stop Token, then it is an Open Block.
             if not prefill_source and prompt:
+                check_window = 1000
+                search_segment = prompt[-check_window:] if len(prompt) > check_window else prompt
+                offset = len(prompt) - len(search_segment)
+                
                 last_open_tag_pos = -1
                 
-                for tag_name in self.flavor.block_tags:
-                    start_marker = f"<{tag_name}"
-                    p = prompt.rfind(start_marker)
+                # Identify Start Tokens: In block_tokens but NOT in end_tokens
+                # (and filter out simple XML closers </...>)
+                start_tokens = [
+                    t for t in self.flavor.block_tokens 
+                    if t not in self.flavor.end_tokens and not t.startswith("</")
+                ]
+                
+                for start_marker in start_tokens:
+                    p_local = search_segment.rfind(start_marker)
                     
-                    if p > last_open_tag_pos:
-                        # Found a candidate start tag. Check if it is closed.
-                        end_marker = f"</{tag_name}>"
-                        p_end = prompt.find(end_marker, p)
-                        
-                        if p_end == -1:
-                            # It is NOT closed. 
-                            # FINAL CHECK: Ensure this open tag is not part of a previous turn.
-                            # If the text following this tag contains turn separators, it's likely just mentioned in history.
-                            candidate_segment = prompt[p:]
-                            # separators = self.flavor.turn_separators # Already defined? No need to redefine if it's property
-                            separators = self.flavor.turn_separators
-                            if separators:
-                                if not any(sep in candidate_segment for sep in separators):
-                                    last_open_tag_pos = p
+                    if p_local != -1:
+                        p_global = offset + p_local
+                        if p_global > last_open_tag_pos:
+                            # Found a newer candidate. Check if closed.
+                            is_closed = False
+                            
+                            # Determine expected End Markers
+                            # A. Harmony / ChatML (<|start|>...)
+                            if "<|start|>" in start_marker or "<|im_start|>" in start_marker:
+                                # Any end token closes a message block
+                                candidates = self.flavor.end_tokens
+                            # B. XML (<tag>...)
                             else:
-                                # No separators defined for this flavor, assume valid
-                                 last_open_tag_pos = p
+                                # Extract tag name: <tool_code> -> </tool_code>
+                                core = start_marker.strip("<>")
+                                candidates = [f"</{core}>"]
+                                
+                            # Search for closure in the remaining tail
+                            for end_marker in candidates:
+                                if search_segment.find(end_marker, p_local) != -1:
+                                    is_closed = True
+                                    break
+                            
+                            if not is_closed:
+                                last_open_tag_pos = p_global
                 
                 if last_open_tag_pos != -1:
                     prefill_source = prompt[last_open_tag_pos:]
+                    if self.debug: logger.info(f"[DEBUG] Prefill Source Detected: {prefill_source!r}")
 
+            # Legacy logic removed
+            # Fix: Ensure full_raw includes the prefill so C++ parser sees the full block
             if prefill_source:
-                # Push prefill text to scanner
-                pre_events = scanner.push(prefill_source)
-                
-                # Process events to update STACK only (suppress output)
-                for ev in pre_events:
-                    if ev.type == "block_start":
-                        block_content_stack.append([ev.tag, "", False]) # Tag, Content, HasStreamed
-                        # Also append the tag itself to parent blocks if any
-                        for item in block_content_stack[:-1]:
-                            item[1] += ev.data
-                    elif ev.type == "block_end":
-                        if block_content_stack:
-                            # We don't interpret/emit closed blocks from prefill, just pop stack
-                            _, content, _ = block_content_stack.pop()
-                            # Append closing tag to parent blocks
-                            for item in block_content_stack:
-                                item[1] += ev.data
-                    elif ev.type == "block_content":
-                        # Accumulate in active blocks
-                        for item in block_content_stack:
-                            item[1] += ev.data
-                    # "content" events (plain text in prefill) are ignored/suppressed
-                
-                # IMPORTANT: Clear the buffer. We don't want any partial text from the prompt 
-                # to be emitted as the start of the response.
-                scanner.buffer = ""
+                # We append prefill to full_raw for consistent logging and parsing later
+                full_raw = prefill_source
             
             # Fix: Ensure full_raw includes the prefill so C++ parser sees the full block
             if prefill_source:
@@ -623,6 +626,42 @@ class BridgeBase:
             actual_stop_seq = None
             decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
             
+            # A.4 Context-Aware EOS: Input Phase (Prefill Check)
+            # We must prime the scanner with the prefill content so it enters the correct Block state (e.g. <|start|>)
+            # BUT we generally do NOT flush/close blocks here. We want the state to remain OPEN for generation.
+            # A.4 Context-Aware EOS: Input Phase (Prefill Check)
+            if prefill_source:
+                # Prime the scanner AND the block_content_stack
+                # We must keep the stack in sync with the scanner state.
+                pre_events = scanner.push(prefill_source)
+                if self.debug: logger.info(f"[DEBUG] Prefill Events: {pre_events}")
+                
+                for ev in pre_events:
+                    if ev.type == "block_start":
+                        # Add tag to parent blocks
+                        for item in block_content_stack:
+                            item[1] += ev.data
+                        # Standard 5-element init
+                        block_content_stack.append([ev.tag, "", False, ev.data, None])
+                        if ev.tag == "implicit_content":
+                             block_content_stack[-1][4] = "content"
+                             
+                    elif ev.type == "block_content":
+                        for item in block_content_stack:
+                            item[1] += ev.data
+                    elif ev.type == "block_end":
+                         if block_content_stack:
+                             block_content_stack.pop()
+                             for item in block_content_stack:
+                                 item[1] += ev.data
+                
+                # Note: We do NOT flush here. State remains open.
+
+            # Start scanning from the END of the prefill logic
+            # Since we just pushed prefill_source to scanner, scanner is up to date.
+            # But full_raw logic in process_and_yield_buffer uses scanner_index.
+            # If full_raw = prefill_source (from above), then scanner_index should be len(full_raw).
+            # This ensures next scan starts from fresh data.
             scanner_index = len(full_raw)
             final_tool_calls = []
 
@@ -639,57 +678,141 @@ class BridgeBase:
                 scanner_index += len(new_data)
                 
                 for ev in events:
+                    if self.debug and ev.type != "content":
+                         logger.info(f"[DEBUG] Event: {ev.type} Tag: {ev.tag} Data: {ev.data!r} StackLen: {len(block_content_stack)}")
+                    
                     if ev.type == "content":
                         yield {"content": ev.data}
                     elif ev.type == "block_start":
                         # Add tag to parent blocks
                         for item in block_content_stack:
                             item[1] += ev.data
-                        block_content_stack.append([ev.tag, "", False])
+                        # Stack Item: [tag, content, executed, start_token, transparent_mode_event_type]
+                        # transparent_mode_event_type is None if buffering, or "content"/"reasoning_content" if streaming
+                        block_content_stack.append([ev.tag, "", False, ev.data, None])
+                        
+                        # Implicit block is always safe -> Stream immediately
+                        if ev.tag == "implicit_content":
+                            block_content_stack[-1][4] = "content"
+
                     elif ev.type == "block_content":
                         # Accumulate in all active blocks
                         for item in block_content_stack:
                             item[1] += ev.data
                         
                         if block_content_stack:
-                            leaf_tag = block_content_stack[-1][0]
-                            interpretation = self.flavor.interpret_block_chunk(leaf_tag, ev.data)
-                            if interpretation:
-                                # Mark as streamed
-                                block_content_stack[-1][2] = True
-                                yield {interpretation[0]: interpretation[1]}
+                            current = block_content_stack[-1]
+                            # Unpack
+                            tag, content, executed, start_tok, transparent_type = current
+                            
+                            # 1. Check if we are already in Transparent (Streaming) Mode
+                            if transparent_type:
+                                yield {transparent_type: ev.data}
+                            
+                            # 2. Gatekeeper Logic: Check if we can open the gate
+                            else:
+                                # Harmony Gate: <|message|>
+                                # XML Gate: > (for standard tags)
+                                is_gate_open = False
+                                body_content = ""
+                                target_type = "content"
+                                
+                                # A. Harmony Logic
+                                if "<|message|>" in content:
+                                    parts = content.split("<|message|>", 1)
+                                    if len(parts) == 2:
+                                        header, body_content = parts[0], parts[1]
+                                        # Only switch if we haven't yielded header part? 
+                                        # Actually we only yield body.
+                                        
+                                        if "final" in header:
+                                            is_gate_open = True
+                                            target_type = "content"
+                                        elif "analysis" in header:
+                                            is_gate_open = True
+                                            target_type = "reasoning_content"
+                                
+                                # B. XML Logic
+                                elif tag == "thinking" and ">" in content:
+                                    # Very simple check: if we passed the tag close.
+                                    # For <thinking>, scanner strips key chars, so content is inner?
+                                    # Wait, Scanner block_content is INSIDE the block.
+                                    # So for XML <thinking>...</thinking>, content is just body.
+                                    # So we don't need a gate inside content?
+                                    # The Scanner entered block AFTER `>`.
+                                    # So XML is ALWAYS transparent for thinking?
+                                    # YES. Scanner logic: `match=<thinking>` -> emits block_start.
+                                    # So we are already inside.
+                                    is_gate_open = True
+                                    target_type = "reasoning_content"
+                                    body_content = content # Yield all accumulated so far
+                                
+                                if is_gate_open:
+                                    # UPDATE STATE
+                                    current[4] = target_type
+                                    
+                                    # FLUSH BUFFER
+                                    # We yield the accumulated body content (post-gate)
+                                    # For Harmony, this is parts[1]. For XML, it's everything.
+                                    if body_content:
+                                        yield {target_type: body_content}
+
                     elif ev.type == "block_end":
                         if block_content_stack:
-                            tag_type, full_content, has_streamed = block_content_stack.pop()
+                            tag_type, full_content, has_streamed, start_tag_data, transparent_type = block_content_stack.pop()
                             # Add closing tag to parent blocks
                             for item in block_content_stack:
                                 item[1] += ev.data
                             
-                            interpretation = self.flavor.interpret_block_complete(tag_type, full_content)
-                            if interpretation:
-                                itype, idata = interpretation
-                                if itype == "tool_use":
-                                    final_tool_calls.extend(idata)
-                                else:
-                                    yield {itype: idata}
-                            elif not has_streamed:
-                                # Fallback: If block interpretation failed (e.g. hallucinated tag or invalid content)
-                                # AND we haven't streamed anything for it, yield raw text to prevent data loss.
-                                fallback_text = f"<{tag_type}>{full_content}{ev.data}"
-                                yield {"content": fallback_text}
+                            # If we were transparent, we successfully streamed everything. 
+                            # We just need to ensure we don't double-yield or error.
+                            if transparent_type:
+                                pass # Done.
+                            else:
+                                # Not transparent -> Perform Post-Hoc Interpretation (e.g. Tool Call)
+                                interpretation = self.flavor.interpret_block_complete(tag_type, full_content, start_tag=start_tag_data)
+                                if interpretation:
+                                    itype, idata = interpretation
+                                    if itype == "tool_use":
+                                        final_tool_calls.extend(idata)
+                                    else:
+                                        yield {itype: idata}
+                                elif not has_streamed:
+                                    # Fallback
+                                    fallback_text = f"{start_tag_data}{full_content}{ev.data}"
+                                    yield {"content": fallback_text}
 
                 # NEW: At EOS (force=True), if we still have open blocks that weren't interpreted/closed,
-                # flush them as raw content to prevent data loss.
+                # attempt to interpret them one last time. This handles cases where model stops (EOS)
+                # without emitting the final closing tag (e.g. <|end|>), but the content is valid.
                 if force and block_content_stack:
-                    leftover_text = ""
-                    if block_content_stack:
-                        # Reconstruct the TOP content and prepend the TOP tag.
-                        root_tag, root_content, _ = block_content_stack[0]
-                        leftover_text = f"<{root_tag}>{root_content}"
+                    while block_content_stack:
+                        # Pop from bottom (FIFO) or Top? 
+                        # Stack is pushed as we go deeper. 
+                        # If we have [Start, Inner]. INNER is definitely unclosed. START is unclosed.
+                        # We should process from Top (Inner) to Bottom? 
+                        # But interpret_block_complete usually handles the whole block content.
+                        # Let's pop from Top to close inner blocks first.
+                        tag_type, full_content, has_streamed, start_tag_data, transparent_type = block_content_stack.pop()
                         
-                    block_content_stack.clear()
-                    if leftover_text:
-                        yield {"content": leftover_text}
+                        # If transparent, it was already streamed.
+                        if transparent_type:
+                            continue
+                            
+                        # Try to interpret
+                        interpretation = self.flavor.interpret_block_complete(tag_type, full_content, start_tag=start_tag_data)
+                        if interpretation:
+                            itype, idata = interpretation
+                            if itype == "tool_use":
+                                final_tool_calls.extend(idata)
+                            else:
+                                yield {itype: idata}
+                        else:
+                            # Fallback: Just dump as text
+                            # Only dump if we haven't streamed it yet
+                            if not has_streamed:
+                                fallback_text = f"{start_tag_data}{full_content}"
+                                yield {"content": fallback_text}
 
             while True:
                 new_bytes = await asyncio.to_thread(self.wrapper.get_next_token, ctx_to_use)
