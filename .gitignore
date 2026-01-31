@@ -8,7 +8,7 @@ build/
 develop-eggs/
 dist/
 downloads/
-vendor/
+vendor/*/**
 eggs/
 .eggs/
 lib/
