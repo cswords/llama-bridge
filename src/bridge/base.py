@@ -556,6 +556,7 @@ class BridgeBase:
             # transparent_mode_event_type: "content" or "reasoning_content" if we are in a transparent block
             block_content_stack = [] # List of [tag_type, content]
             prefill_source = None
+            prefill_offset = 0
             
             # 1. (Valid Prefill Check Removed) 
             # We previously checked 'messsages[-1]' content, but that extracts raw text, 
@@ -621,6 +622,7 @@ class BridgeBase:
             # Fix: Ensure full_raw includes the prefill so C++ parser sees the full block
             if prefill_source:
                 full_raw = prefill_source
+                prefill_offset = len(prefill_source)
 
             last_yield_time = time.time()
             actual_stop_seq = None
@@ -824,7 +826,9 @@ class BridgeBase:
                         yield chunk
                     
                     # Authority Stage 2 (Final): Re-verify tools with C++ parser
-                    parsed = self.wrapper.parse_response(full_raw, False)
+                    # EXCLUDE PREFILL from parsing to prevent duplicate tag detection
+                    parse_input = full_raw[prefill_offset:]
+                    parsed = self.wrapper.parse_response(parse_input, False)
                     self._log_request("parsed_response", parsed, log_id)
                     tc = parsed.get("tool_calls", [])
                     if tc and not final_tool_calls:
@@ -836,7 +840,8 @@ class BridgeBase:
                     if not final_tool_calls and actual_stop_seq:
                         stop_reason = "stop_sequence"
 
-                    self._log_request("raw_output", full_raw, log_id)
+                    # EXCLUDE PREFILL from raw_output log to show only model generation
+                    self._log_request("raw_output", full_raw[prefill_offset:], log_id)
                     final_chunk = {
                         "content": "", 
                         "reasoning_content": parsed.get("reasoning_content", ""),
@@ -864,14 +869,17 @@ class BridgeBase:
                             yield chunk
                         
                         # Authority Stage 2 (Final): Re-verify tools
-                        parsed = self.wrapper.parse_response(full_raw, False)
+                        # EXCLUDE PREFILL from parsing to prevent duplicate tag detection
+                        parse_input = full_raw[prefill_offset:]
+                        parsed = self.wrapper.parse_response(parse_input, False)
                         self._log_request("parsed_response", parsed, log_id)
                         tc = parsed.get("tool_calls", [])
                         if tc and not final_tool_calls:
                             final_tool_calls = tc
 
                         usage = self.wrapper.get_usage(ctx_to_use)
-                        self._log_request("raw_output", full_raw, log_id)
+                        # EXCLUDE PREFILL from raw_output log to show only model generation
+                        self._log_request("raw_output", full_raw[prefill_offset:], log_id)
                         final_chunk = {
                             "content": "",
                             "reasoning_content": parsed.get("reasoning_content", ""),

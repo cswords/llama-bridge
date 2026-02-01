@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import json
 from .base import BaseFlavor
 from .templates import ChatMLTemplate
@@ -16,6 +16,21 @@ class MiniMaxFlavor(HarmonyProtocol, LegacyMiniMaxProtocol, ChatMLTemplate):
     @property
     def turn_separators(self) -> List[str]:
         return super().turn_separators + ["<|channel|>", "<|message|>", "<|call|>", "<|return|>"]
+
+    @property
+    def block_tokens(self) -> List[str]:
+        # Add thinking tags and the tool wrapper tag
+        # The Scanner will handle Opaque Mode for these blocks, so we don't need to filter parameters.
+        return super().block_tokens + ["<think>", "</think>", "<minimax:tool_call>", "</minimax:tool_call>"]
+
+    def interpret_block_complete(self, tag: str, content: str, start_tag: Optional[str] = None) -> Optional[Tuple[str, Any]]:
+        if tag == "think":
+            return ("reasoning_content", content)
+        if tag == "minimax:tool_call":
+            # Delegate content (which contains <invoke>...) to the legacy parser
+            # This handles cases where the model wraps invokes in <minimax:tool_call>
+            return ("tool_use", self._parse_legacy_tools(content))
+        return super().interpret_block_complete(tag, content, start_tag)
     
     def apply_template(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]] | None = None) -> Optional[str]:
         # Implementation of full Harmony Template
