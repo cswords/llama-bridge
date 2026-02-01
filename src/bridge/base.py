@@ -557,7 +557,8 @@ class BridgeBase:
             block_content_stack = [] # List of [tag_type, content]
             prefill_source = None
             prefill_offset = 0
-            
+            full_raw = ""
+
             # 1. (Valid Prefill Check Removed) 
             # We previously checked 'messsages[-1]' content, but that extracts raw text, 
             # causing the Scanner to miss the critical Block Start Tokens (e.g. <|start|>assistant).

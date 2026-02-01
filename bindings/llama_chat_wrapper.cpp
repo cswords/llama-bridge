@@ -337,16 +337,30 @@ public:
     // Invalidate KV cache beyond n_keep
     llama_memory_t mem = llama_get_memory(ctx);
     bool rm_ok = llama_memory_seq_rm(mem, 0, (llama_pos)n_keep, -1);
+
     if (!rm_ok) {
-      std::cerr << "WARNING: llama_memory_seq_rm(0, " << n_keep
-                << ", -1) returned false!" << std::endl;
-      llama_memory_seq_rm(mem, -1, (llama_pos)n_keep, -1);
+      std::cerr << "WARNING: Partial rewind not supported by backend. Clearing "
+                   "context to recover."
+                << std::endl;
+      // Fallback: Clear the entire sequence for seq_id 0
+      llama_memory_seq_rm(mem, 0, -1, -1);
+      // Reset n_keep to 0 since we wiped the history
+      n_keep = 0;
     }
 
     // Handle prompt cache status
     if (n_keep == tokens.size() && n_keep > 0) {
       n_keep--;
-      llama_memory_seq_rm(mem, 0, (llama_pos)n_keep, -1);
+      // We must re-attempt removal from the new n_keep position
+      // If the backend didn't support partial remove above, this might fail
+      // too. But if n_keep was decreased, we are in a new state. To be safe,
+      // let's try. If it fails, we fall back to full clear again.
+      if (!llama_memory_seq_rm(mem, 0, (llama_pos)n_keep, -1)) {
+        std::cerr << "WARNING: Perfect match rewind failed. Clearing context."
+                  << std::endl;
+        llama_memory_seq_rm(mem, 0, -1, -1);
+        n_keep = 0;
+      }
     }
 
     // Check context space

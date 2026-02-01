@@ -21,6 +21,7 @@ wheels/
 .installed.cfg
 *.egg
 configs/bak
+samples
 
 # Virtual Environment
 .venv/

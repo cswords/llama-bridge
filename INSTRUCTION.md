@@ -45,10 +45,15 @@ graph TD
     
     subgraph "Llama-Bridge Process"
         Server --> Router[Router]
-        Router -->|Route Request| Bridge[Bridge Core]
+        Router -->|Route Request| Bridge[ChatBridge Core]
         
-        subgraph "Python Logic"
-            Bridge -->|Convert Protocol| Adapter[Protocol Adapter (LiteLLM)]
+        subgraph "Python Logic (ChatBridge)"
+            Bridge -->|Lock & Log| LogSys[Logging System]
+            Bridge -->|Get MetaData| Flavor[Flavor (The Knowledge)]
+            Bridge -->|Stream Chunk| Scanner[Scanner (The State Machine)]
+            
+            Scanner <-->|Query Attr| Flavor
+            
             Bridge -->|Select Context| Wrapper[LlamaChatWrapper (C++)]
         end
         
@@ -64,6 +69,109 @@ graph TD
         end
     end
 ```
+
+## 2.1 ChatBridge 架构重构 (Architecture v2, New!)
+
+为了更好地解决流式输出与结构化解析之间的矛盾，我们引入了全新的 `ChatBridge` 架构。
+
+### 核心设计哲学 (Design Philosophy)
+1.  **非对称性 (Asymmetry)**：
+    *   **Input (Batch)**：输入端（用户 Prompt）是低延迟的，通常一次性提交。Scanner 在此阶段负责**初始化状态**（例如检测 Prefill），但不负责流式输出。
+    *   **Output (Streaming)**：输出端（LLM 生成）是高延迟的。Scanner 在此阶段负责**流式扫描**，其存在的唯一意义是**降低用户感知的延迟**（TTFT），让用户在生成过程中就能看到结构化信息。
+
+2.  **职责解耦 (Decoupling)**：
+    *   **Flavor (The Brain)**：**知识库与裁判**。它不仅定义 Token，更负责**裁决** Block 的运行时属性。例如，它告诉 Scanner：“`<think>` 是流式块”、“`<tool>` 是缓冲块”。
+    *   **Scanner (The State Machine)**：**执行者**。它维护状态栈，严格执行 Flavor 的裁决。
+    *   **Bridge (The Dispatcher)**：**调度者**。它卸下了复杂的堆栈维护工作，只负责并发锁、日志记录（4 Artifacts）、以及将 Scanner 产出的高层事件分发给客户端。
+
+### 核心组件行为 (Component Behavior)
+
+#### 1. Scanner (State Machine)
+*   **状态全知**：Scanner 知道自己是处于 `Content Block`（需要流式输出）还是 `Tool Block`（需要缓冲）。
+*   **Opaque Mode (不透明/缓冲模式)**：
+    *   当进入 `Tool Block`（如 `<invoke>`）时，Scanner 切换到此模式。
+    *   **行为**：忽略内部所有的 Start Token（防止 `<parameter>` 泄露或误判），只寻找闭合标签。将内容存入 Buffer。
+    *   **目的**：确保工具调用等复杂结构被完整捕获后，一次性解析为对象。
+*   **Transparent Mode (透明/流式模式)**：
+    *   当处于 `Content Block`（如默认文本或 `<think>`）时，Scanner 处于此模式。
+    *   **行为**：逐块输出内容，并允许扫描嵌套的 Block（如内容中包含工具调用）。
+
+#### 2. Flavor (The Authority)
+*   **动态判定**：不再是静态的配置列表。Flavor 提供运行时接口，回答 Scanner 的问题：
+    *   `is_streaming_block(tag) -> bool`
+    *   `is_opaque_block(tag) -> bool`
+*   **输入感知**：Flavor 解析 Prompt 后缀，帮助 Scanner 初始化状态（如检测到 Prompt 以 `<think>` 结尾，则通知 Scanner 初始状态为 `Thinking`）。
+
+#### 3. Logging System (Debug Mode)
+每个 Roundtrip 严格生成 4 份关键 Artifact，实现完美的可调试性：
+1.  **raw_request**: 客户端原始请求 (JSON)。
+2.  **prompt**: 发给 LLM 的最终 Prompt (Text)。
+3.  **raw_response_stream**: LLM 原始流式输出 (Log Stream)。
+4.  **final_response**: 发给客户端的最终响应 (JSONL)。
+
+### 关键设计问答 (Q&A)
+
+#### Q1: Scanner 如何判断一个 Tag 是否完整？
+**Flavor 负责立法，Scanner 负责执法。**
+*   **Flavor (立法)**：必须提供一份精确的、不可分割的 Token 列表（例如 `"<invoke"` 而不是 `"<invoke>"`，因为属性可变）。
+*   **Scanner (执法)**：执行机械的字符串**最长前缀匹配**。
+    *   **Wait**: 缓冲区是 `<inv`（匹配前缀），挂起等待。
+    *   **Trigger**: 缓冲区补全为 `"<invoke"`，判定匹配成功，切分并进入 Block。
+    *   **Pass**: 缓冲区是 `<abc`（无匹配），直接视为文本流式输出。
+
+#### Q2: Protocol 与 Flavor 有什么区别？
+**Protocol 是通用组件，Flavor 是最终产品。**
+*   **Protocol (规则集)**：抽象的、可复用的 Mixin（如 `HarmonyProtocol` 定义了通用格式）。不仅定义 Tag，更定义了一套逻辑规范。
+*   **Flavor (具体实现)**：最终实例化的类（如 `MiniMaxFlavor`）。它负责**组合**多个 Protocol（Harmony + Legacy Invoke），并打上模型特有的补丁。
+*   **公式**：`Flavor = Protocol A + Protocol B + Model Specific Patches`。
+
+#### Q3: Scanner 总是从 Raw Response 的第一个字符开始处理吗？
+**处理内容是从第一个字符开始，但状态不是从零开始！**
+*   **Prefill 感知**：Scanner 的生命周期始于 Prompt 的**结尾**。
+*   **状态继承**：如果 Prompt 以 `<think>` 结尾（预填），Scanner 在接收 Response 的第一个字符之前，甚至在接收任何数据之前，必须先将自己的状态栈初始化为 `Inside Thinking Block`。
+*   **后果**：如果 Scanner 像一张白纸一样从 Response 开始处理，就会丢失上下文，导致将预填的思考内容误判为普通文本泄露。
+
+#### Q4: 普通的 Content 是一个 Block 吗？
+**哲学上不是，技术上是。**
+*   **隐式根 (Implicit Root)**：为了代码逻辑的统一性，Stack 的栈底永远有一个隐式的 Block。
+*   **普通文本**：被视为这个隐式 Block 的 Payload。
+*   **结束条件**：它没有 End Token，生命周期与整个 Stream 同步，直到 EOS（End of Stream）才结束。
+
+#### Q5: Block 之间允许嵌套吗？
+**必须允许，这是系统逻辑连贯性的基石。**
+*   **逻辑连贯性**：如果不允许嵌套，遇到 `<tool>` 就必须强制结束 `<think>`。这会导致 `<think>` 的属性丢失（后半段思考变色）以及闭合标签变成孤儿（`<think>` 没了，但 `</think>` 还在）。
+*   **Opaque Mode (安全锁)**：为了防止解析混乱，我们引入了严格的嵌套规则。
+
+| 父 Block 类型 | 属性 | 允许子 Block | 行为 |
+| :--- | :--- | :--- | :--- |
+| **Implicit Root** | 透明 | Content / Reasoning / Tool | 正常流式输出 |
+| **Reasoning** | 透明 | **仅 Tool** (禁止 Content/Think) | 正常流式输出 |
+| **Tool / Code** | **不透明** | **禁止** | 纯缓冲，无视内部任何标签 |
+
+#### Q6: 有哪些具体的 Protocol 和 Flavor？
+**针对主流模型进行精准映射，并针对 GLM 实现特殊逻辑。**
+*   **Protocols**:
+    *   `XMLTagProtocol`: 通用 XML 处理 (Qwen, MiniMax, Mimo)。
+    *   `HarmonyProtocol`: 处理 GPT-OSS/MiniMax 的 Control Tokens。
+    *   `GLMFlashProtocol`: **专用于 GLM-4.7-Flash**。因为它使用“扁平 XML 序列”（`<tool_call>Name<arg_key>Key</arg_key>...`），既不是 JSON 也不是属性，所以必须独立处理。
+*   **Flavors**:
+    *   `HarmonyFlavor` -> GPT-OSS (纯净 Harmony)。
+    *   `MiniMaxFlavor` -> MiniMax-M2.1 (Harmony + XML Body)。
+    *   `MimoFlavor` -> Mimo-V2-Flash (Harmony + Namespace Tags)。
+    *   `QwenFlavor` -> Qwen3-Next (XML + JSON)。
+    *   `GLMFlashFlavor` -> GLM-4.7-Flash (Custom Sequence)。
+
+#### Q7: 不透明块（Opaque Block）是如何被解析的？
+**流式阶段“丢弃”，终局阶段“算总账”。（Hybrid Parsing Strategy）**
+*   **Scanner (流式阶段)**：只负责“切分”和“展示”。
+    *   遇到 Content/Reasoning：直接流式输出（即时体验）。
+    *   遇到 Tool/Opaque：**直接忽略（Drop）**。不尝试解析，也不发送事件。
+*   **Bridge (终局阶段)**：
+    *   等待 Stream 结束，获得完整的 `full_response`。
+    *   调用 **C++ `parse_response(full_response)`**。
+    *   C++ 负责解析出所有的 Tool Calls。
+    *   Bridge 将 C++ 解析出的 Tool 转换为事件发送给客户端。
+*   **优势**：规避了流式解析片段的极大风险，确保了解析逻辑的唯一真理来源（Source of Truth）永远是 C++ `llama-chat` 库。
 
 ### 数据流向
 1. **Request**: 客户端发送 HTTP 请求（如 `/v1/messages`）。
