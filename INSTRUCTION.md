@@ -11,6 +11,26 @@ Llama-Bridge 不使用 `llama-server` 或其他 HTTP 后端。它通过 pybind11
 - **低延迟**：消除了内部组件间的 HTTP 序列化/反序列化开销。
 - **真流式**：Token 生成后立即传递给 Python 层，实现毫秒级首字响应。
 
+## 1.5 命名与代码组织规范 (Coding Standards)
+
+为了保证项目的长期可维护性和清晰度，所有 Python 代码必须严格遵守以下规则：
+
+1.  **一文件一类 (One Class Per File)**：
+    *   **原则**：每个 Python 文件最多只包含一个主要的 Class 定义。
+    *   **目的**：避免单文件过大（God File），提高代码查找效率。
+    *   **例外**：紧密相关的非常小的辅助类（Helper Class）或 Enum 可以与主类放在同一文件，但必须从属关系明确。
+
+2.  **文件名完整映射类名**：
+    *   文件名必须由类名转换而来（Snake Case）。
+    *   **示例**：`class BridgeBase` 必须位于 `bridge_base.py`，**严禁**简化为 `base.py`。
+    *   **示例**：`class XMLTagProtocol` 必须位于 `xml_tag_protocol.py`。
+
+3.  **保留语义前缀**：
+    *   不要因为文件在 `bridge/` 目录下就省略文件名的 `bridge_` 前缀。
+    *   **正确**：`src/chat_bridge/chat_bridge_scanner.py`
+    *   **错误**：`src/chat_bridge/scanner.py`
+    *   **理由**：当在 IDE 中打开多个文件时（如 `model/base.py`, `view/base.py`），保留前缀能立刻区分上下文，防止混淆。
+
 ### 🔄 统一配置与路由系统 (Unified Config & Routing)
 支持通过 TOML 文件定义复杂的路由规则，实现单一端口支持多种业务场景。
 - **多模型/多缓存**：支持加载一个大模型（如 Sonnet 级），并为其配置多个隔离的 KV Cache。
@@ -96,6 +116,13 @@ graph TD
     *   当处于 `Content Block`（如默认文本或 `<think>`）时，Scanner 处于此模式。
     *   **行为**：逐块输出内容，并允许扫描嵌套的 Block（如内容中包含工具调用）。
 
+*   **Smart Prefix Buffering (智能前缀缓冲)**：
+    *   针对流式输出中标签被切断（如 `<tool_`）的情况，Scanner 实现了智能前缀匹配。
+    *   **Match Type 策略**：
+        *   **Control Token (Atomic)**：假设为原子性输出，使用普通匹配，优先检测。
+        *   **Text Tag (Streaming)**：开启高敏感缓冲。遇到 `<` 时，检查是否匹配任何已知 Tag 的前缀。如果是，则挂起直到确认匹配或不匹配。
+        *   **白名单机制**：只有在白名单内的 Tag 前缀才会触发缓冲，防止数学符号 `<` 导致阻塞。
+
 #### 2. Flavor (The Authority)
 *   **动态判定**：不再是静态的配置列表。Flavor 提供运行时接口，回答 Scanner 的问题：
     *   `is_streaming_block(tag) -> bool`
@@ -151,15 +178,12 @@ graph TD
 #### Q6: 有哪些具体的 Protocol 和 Flavor？
 **针对主流模型进行精准映射，并针对 GLM 实现特殊逻辑。**
 *   **Protocols**:
-    *   `XMLTagProtocol`: 通用 XML 处理 (Qwen, MiniMax, Mimo)。
-    *   `HarmonyProtocol`: 处理 GPT-OSS/MiniMax 的 Control Tokens。
-    *   `GLMFlashProtocol`: **专用于 GLM-4.7-Flash**。因为它使用“扁平 XML 序列”（`<tool_call>Name<arg_key>Key</arg_key>...`），既不是 JSON 也不是属性，所以必须独立处理。
+    *   `XMLTagProtocol`: 通用 XML 处理 (Qwen)。
+    *   `HarmonyProtocol`: 处理 GPT-OSS 的 Control Tokens。
 *   **Flavors**:
-    *   `HarmonyFlavor` -> GPT-OSS (纯净 Harmony)。
-    *   `MiniMaxFlavor` -> MiniMax-M2.1 (Harmony + XML Body)。
-    *   `MimoFlavor` -> Mimo-V2-Flash (Harmony + Namespace Tags)。
-    *   `QwenFlavor` -> Qwen3-Next (XML + JSON)。
-    *   `GLMFlashFlavor` -> GLM-4.7-Flash (Custom Sequence)。
+    *   `GPTOSSFlavor` -> GPT-OSS (Harmony).
+    *   `QwenFlavor` -> Qwen (XML Tag).
+    *   `GLMFlavor` -> GLM-4 (Thinking + XML Tool).
 
 #### Q7: 不透明块（Opaque Block）是如何被解析的？
 **流式阶段“丢弃”，终局阶段“算总账”。（Hybrid Parsing Strategy）**

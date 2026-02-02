@@ -115,9 +115,7 @@ public:
       n_ubatch_ = (n_batch_ > 0) ? n_batch_ : 512;
     }
 
-    // Create default context
-    create_context("default", n_ctx_default_);
-    loaded_ = true;
+    // Contexts will be created explicitly from Python
   }
 
   ~LlamaChatWrapper() {

@@ -102,6 +102,24 @@ async def anthropic_messages(request: Request) -> Response:
     
     body = await request.json()
     
+    # --- EXPERIMENTAL CHAT BRIDGE PATH ---
+    # Detect if we are using the new ChatBridge (checking for 'generate' method)
+    if hasattr(bridge, "generate") and not hasattr(bridge, "stream_anthropic"):
+        logger.info("Routing request to Experimental ChatBridge")
+        messages = body.get("messages", [])
+        # Append system prompt to messages if present
+        system_prompt = body.get("system")
+        if system_prompt:
+             # Prepend system message
+             messages = [{"role": "system", "content": system_prompt}] + messages
+             
+        # TODO: Handle stream=False locally? For now assumes stream=True or client handles stream format
+        return StreamingResponse(
+            bridge.generate(messages), 
+            media_type="text/event-stream"
+        )
+    # -------------------------------------
+    
     # Route the request to appropriate cache
     cache_name = None
     if router:
@@ -109,7 +127,7 @@ async def anthropic_messages(request: Request) -> Response:
             model_name = body.get("model")
             cache_config = router.route("/v1/messages", model_name)
             cache_name = cache_config.name
-        except ConfigurationError as e:
+        except Exception as e:
             logger.warning(f"Routing failed: {e}")
     
     # Check if streaming is requested
@@ -146,9 +164,8 @@ async def anthropic_messages(request: Request) -> Response:
             )
     else:
         result = await bridge.complete_anthropic(body, cache_name=cache_name)
-        return Response(
-            content=result,
-            media_type="application/json",
+        return JSONResponse(
+            content=result
         )
 
 
@@ -339,6 +356,9 @@ def main():
     parser.add_argument("--debug", action="store_true", help="Enable debug logging and 4-file logs")
     parser.add_argument("--mock", action="store_true", help="Use mock inference (for testing)")
     
+    # Experimental V2 Bridge
+    parser.add_argument("--exp", action="store_true", help="[EXPERIMENTAL] Enable ChatBridge V2 Mode (uses standard config)")
+
     args = parser.parse_args()
     
     # Configure logging
@@ -349,8 +369,9 @@ def main():
     )
     
     # Load or create configuration
-    global config, router
+    global config, router, bridge
     
+    # --- STANDARD CONFIG LOADING ---
     if args.config:
         # Load from configuration file
         try:
@@ -383,7 +404,6 @@ def main():
     
     # Resolve model paths and initialize bridge
     # For now, we only support a single model (first one in config)
-    global bridge
     
     if args.mock:
         # Mock mode
@@ -420,23 +440,34 @@ def main():
         n_ctx = primary_cache.n_ctx if primary_cache and primary_cache.n_ctx > 0 else args.n_ctx
         
         try:
-            bridge = Bridge(
-                model_path=str(model_path),
-                debug=args.debug,
-                mock=False,
-                n_ctx=n_ctx,
-                n_batch=model_config.n_batch or args.n_batch,
-                n_ubatch=model_config.n_ubatch or args.n_ubatch,
-                n_threads=model_config.n_threads or args.n_threads,
-                flash_attn=model_config.flash_attn or args.flash_attn,
-                cache_type_k=primary_cache.cache_type_k or model_config.cache_type_k if primary_cache else model_config.cache_type_k,
-                cache_type_v=primary_cache.cache_type_v or model_config.cache_type_v if primary_cache else model_config.cache_type_v,
-                # Pass cache configs for multi-context support
-                cache_configs=[
+            # Common instantiation arguments
+            init_kwargs = {
+                "model_path": str(model_path),
+                "debug": args.debug,
+                "n_ctx": n_ctx,
+                "n_batch": model_config.n_batch or args.n_batch,
+                "n_ubatch": model_config.n_ubatch or args.n_ubatch,
+                "n_threads": model_config.n_threads or args.n_threads,
+                "flash_attn": model_config.flash_attn or args.flash_attn,
+                "cache_type_k": primary_cache.cache_type_k or model_config.cache_type_k if primary_cache else model_config.cache_type_k,
+                "cache_type_v": primary_cache.cache_type_v or model_config.cache_type_v if primary_cache else model_config.cache_type_v,
+                "cache_configs": [
                     {"name": c.name, "n_ctx": c.n_ctx}
                     for c in cache_configs
                 ],
-            )
+            }
+            
+            if args.exp:
+                # Experimental Mode
+                from src.chat_bridge.bridge import ChatBridge
+                logger.warning(f"⚠️  ACTIVATING EXPERIMENTAL CHAT BRIDGE V2 FOR MODEL: {model_path.name} ⚠️")
+                bridge = ChatBridge(**init_kwargs)
+            else:
+                # Standard Mode
+                bridge = Bridge(
+                    mock=False,
+                    **init_kwargs
+                )
             
             logger.info(f"Model: {model_path}")
             logger.info(f"Caches configured: {[c.name for c in cache_configs]}")

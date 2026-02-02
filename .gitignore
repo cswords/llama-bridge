@@ -62,3 +62,4 @@ scripts/hfd.sh
 .pytest_cache
 *.txt
 runs/*
+test_*.sh
