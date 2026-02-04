@@ -63,3 +63,4 @@ scripts/hfd.sh
 *.txt
 runs/*
 test_*.sh
+build_bindings

@@ -6,6 +6,7 @@ from src.chat_bridge.flavors.glm_flavor import GLMFlavor
 from src.chat_bridge.flavors.gpt_oss_flavor import GPTOSSFlavor
 from src.chat_bridge.flavors.minimax_flavor import MiniMaxFlavor
 from src.chat_bridge.flavors.mimo_flavor import MimoFlavor
+from src.chat_bridge.flavors.deepseek_flavor import DeepSeekFlavor
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +23,10 @@ class FlavorFactory:
         """
         model_path_lower = model_path.lower()
         
-        if "qwen" in model_path_lower:
+        if "deepseek" in model_path_lower or "r1" in model_path_lower:
+            logger.info(f"FlavorFactory: Detected DeepSeekFlavor for model {model_path}")
+            return DeepSeekFlavor()
+        elif "qwen" in model_path_lower:
             logger.info(f"FlavorFactory: Detected QwenFlavor for model {model_path}")
             return QwenFlavor()
         elif "glm" in model_path_lower:
